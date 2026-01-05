@@ -1,0 +1,53 @@
+---
+globs: **/*Test.kt
+alwaysApply: false
+---
+# Common Testing Patterns (Spring Boot + Kotlin)
+
+Applied to: all `**/*Test.kt`.
+
+## Core Principles
+- **AAA 패턴(Arrange-Act-Assert)**으로 테스트를 작성합니다.
+- **작게, 명확하게**: 테스트 하나는 한 가지 행동/규칙만 검증합니다.
+- **Mock은 외부 의존/경계에만** 사용합니다. (Do not mock business logic unnecessarily.)
+- **응답/예외 컨벤션을 그대로 검증**합니다: `BaseResponse`, `BaseException` 흐름.
+
+## Test Framework / Tools (현재 프로젝트 기준)
+- **Kotest**: `io.kotest:kotest-runner-junit5`, `kotest-assertions-core`
+- **MockK**: `io.mockk:mockk`
+- **springmockk**: `com.ninja-squad:springmockk` (스프링 빈 mocking)
+- **Spring MVC test**: `spring-boot-starter-webmvc-test`
+
+## Naming & Placement
+- 파일명은 `*Test.kt`로 끝나야 합니다.
+- **SHOULD**: 도메인별로 테스트 패키지를 맞춥니다.  
+  예: `com.dalmeng.convention.todo.controller.TodoControllerTest`
+
+## Controller vs Service Tests
+
+### Controller tests (thin, contract-ish)
+- **MUST**: Service는 mock 처리하고, HTTP 바인딩/응답 구조만 검증합니다.
+- **MUST**: BaseResponse envelope를 항상 검증합니다.
+
+### Service tests (business rules)
+- **SHOULD**: 비즈니스 로직(soft delete, not found, patch update)을 중심으로 검증합니다.
+- DB를 사용하는 테스트는 `@DataJpaTest`/Testcontainers 등으로 분리합니다(프로젝트 상황에 맞춰 선택).
+
+## “seq 노출 금지” 테스트 포인트
+- **MUST**: 응답 JSON에 `seq`가 없는지 검증합니다. (security regression test)
+
+예시(컨트롤러 응답 JSON):
+```kotlin
+mockMvc.perform(get("/todos/{id}", "some-uuid"))
+    .andExpect(status().isOk)
+    .andExpect(jsonPath("$.data.seq").doesNotExist())
+```
+
+## Exception 테스트 포인트
+- **MUST**: 도메인 not found는 도메인 예외로 처리되고, `GlobalExceptionHandler`가 `BaseResponse.error`로 변환하는 흐름을 검증합니다.
+
+## Key Rules
+- ✅ Kotest + MockK + springmockk 사용
+- ✅ Controller는 얇게 테스트, Service는 규칙 테스트
+- ✅ `BaseResponse`/`BaseException` 컨벤션 유지
+- ✅ `seq` 미노출 테스트를 추가

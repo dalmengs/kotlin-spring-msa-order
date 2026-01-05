@@ -1,0 +1,725 @@
+---
+alwaysApply: true
+---
+
+# JPA & Database Convention (Spring Boot + Kotlin)
+
+This rule defines database access patterns and conventions for Spring Boot applications using JPA, QueryDSL, and JDBC.
+
+## AI Behavior Guidelines
+
+When implementing database operations, you MUST:
+
+1. **Identify the operation type first**: SELECT, CREATE, UPDATE, or DELETE
+2. **Follow the corresponding convention** for that operation type
+3. **If the task doesn't fit any defined flow**, do NOT write code. Instead:
+   - Propose an implementation approach following convention principles
+   - Explain your reasoning in detail
+   - Wait for developer confirmation before proceeding
+
+---
+
+## Repository Structure
+
+All queries MUST be handled in Repository classes under `{domain}.repository` package.
+
+### 1. `{domain}Repository` - JPA Repository Interface
+
+Standard JPA Repository extending `JpaRepository`.
+
+```kt
+interface ChatroomRepository : JpaRepository<Chatroom, Long>
+```
+
+### 2. `{domain}QueryRepository` - QueryDSL Custom Repository
+
+Custom repository with injected `JPAQueryFactory` for complex queries using Q-classes.
+
+```kt
+@Repository
+class ChatroomQueryRepository(
+    private val queryFactory: JPAQueryFactory,
+) {
+    private val chatroom = QChatroom.chatroom
+    // ...
+}
+```
+
+---
+
+# SELECT Operations
+
+**Required**: `@Transactional(readOnly = true)` on service layer methods
+
+## Single Record Retrieval
+
+### Case 1: No Joins Required
+
+Use standard `JpaRepository` methods — **except for `findById`**.
+
+> ⚠️ **Critical: Identifier Type Convention**
+>
+> | Field | Type | Purpose |
+> |-------|------|---------|
+> | `id` | `String` | External identifier (API-facing) |
+> | `seq` | `Long` | Internal database PK (never exposed) |
+>
+> **Do NOT use** Spring Data JPA's default `findById(id: Long)`.
+
+**Why `findById` must be implemented manually**:
+- JPA's default `findById` expects `Long` (the `@Id` type, which is `seq`)
+- Our external identifier is `id: String`, not `seq: Long`
+- You MUST implement `findById(id: String)` in `QueryRepository` or via JPQL
+
+<bad-example title="Using JPA default findById">
+
+```kt
+// ❌ FORBIDDEN: Uses internal seq (Long), not external id (String)
+repository.findById(seq)
+```
+</bad-example>
+
+<example title="Correct findById Implementation (QueryDSL)">
+
+```kt
+@Repository
+class UserProfileQueryRepository(
+    private val queryFactory: JPAQueryFactory,
+) {
+    private val userProfile = QUserProfile.userProfile
+
+    fun findById(id: String): UserProfile? {
+        return queryFactory
+            .selectFrom(userProfile)
+            .where(userProfile.id.eq(id))
+            .fetchOne()
+    }
+}
+```
+</example>
+
+<example title="Correct findById Implementation (JPQL)">
+
+```kt
+@Query("""
+    select u
+    from UserProfile u
+    where u.id = :id
+""")
+fun findByUserId(@Param("id") id: String): UserProfile?
+```
+</example>
+
+**Rationale**:
+- Strict separation between external identifiers (`id`) and internal PKs (`seq`)
+- Prevents accidental exposure of database internals
+- Consistent repository APIs across entire codebase
+- Paging/sorting/range queries use `seq` internally, but API uses `id`
+
+### Case 2: 1:1 Relations and/or Single 1:N Relation
+
+Use JPQL `join fetch`.
+
+**Rules**:
+- 1:1 relations: Unlimited `join fetch` allowed in single query
+- 1:N collections: **Maximum 1 collection** per query allowed
+
+<example title="1:1 Relation">
+
+```kt
+@Query("""
+    select u
+    from UserProfile u
+    left join fetch u.metadata
+    where u.id = :id
+""")
+fun findUserById(id: String): UserProfile?
+```
+</example>
+
+<example title="Multiple 1:1 Relations (Chained)">
+
+```kt
+@Query("""
+    select cg
+    from ChatGroup cg
+    left join fetch cg.chatroom cr
+    left join fetch cr.userProfile ur
+    left join fetch ur.metadata um
+    where cg.id = :chatGroupId
+""")
+fun findByChatGroupId(chatGroupId: String): ChatGroup?
+```
+</example>
+
+<example title="1:N Relation (Single Collection)">
+
+```kt
+@Query("""
+    select c
+    from Chatroom c
+    left join fetch c.chatroomCharacters cc
+    left join fetch cc.character
+    where c.id = :chatroomId
+""")
+fun findChatroomById(id: String): Chatroom?
+```
+</example>
+
+**Summary**:
+- N:1, 1:1 relations → Unlimited fetch joins
+- 1:N collections → **Max 1 per query**
+- Multiple 1:N collections → Use Multi-Step Fetch Join (see Case 4)
+
+### Case 3: N:M Relations
+
+**Convention**: Do NOT use `@ManyToMany`. Create intermediate entity instead.
+
+Example: `Chatroom` ↔ `Character` becomes `Chatroom` → `ChatroomCharacter` → `Character`
+
+This transforms N:M into 1:N + N:1, which follows Case 2 rules.
+
+### Case 4: Multiple 1:N Relations (Multi-Step Fetch Join)
+
+When loading multiple 1:N collections, use **QueryDSL with Multi-Step Fetch Join**.
+
+**Strategy**:
+1. First query: Load root entity with ONE 1:N collection (use `distinct`)
+2. Subsequent queries: Load remaining 1:N collections separately
+3. 1:1 relations can be included in any query
+
+<example title="Multi-Step Fetch Join">
+
+```kt
+fun findByChatGroupId(chatGroupId: String): ChatGroup? {
+    // Step 1: Root entity + first 1:N collection
+    val root = queryFactory
+        .selectFrom(chatGroup)
+        .distinct()
+        .leftJoin(chatGroup.chatroom, chatroom).fetchJoin()
+        .leftJoin(chatGroup.chatContentGroups, chatContentGroup).fetchJoin()
+        .leftJoin(chatroom.userProfile, userProfile).fetchJoin()
+        .leftJoin(userProfile.metadata, userProfileMetadata).fetchJoin()
+        .where(chatGroup.id.eq(chatGroupId))
+        .fetchOne()
+        ?: return null
+
+    // Step 2: Second 1:N collection
+    queryFactory
+        .selectFrom(chatContentGroup)
+        .leftJoin(chatContentGroup.chatGroup, chatGroup)
+        .leftJoin(chatContentGroup.chatContents, chatContent).fetchJoin()
+        .leftJoin(chatContent.userProfile, chatContentUserProfile).fetchJoin()
+        .leftJoin(chatContent.character, character).fetchJoin()
+        .where(chatGroup.id.eq(chatGroupId))
+        .fetch()
+
+    return root
+}
+```
+</example>
+
+**Key Point**: Each additional 1:N collection requires one additional query.
+
+---
+
+## Paging Interface Convention
+
+### 1. Common Paging Request
+
+Use `BasePagingRequest` in controllers:
+
+```kt
+data class BasePagingRequest(
+    val limit: Int = 20,
+    val page: Int? = null,
+    val cursor: String? = null,
+    val direction: PagingDirection = PagingDirection.DOWN
+)
+```
+
+### 2. Common Paging Response
+
+```kt
+data class PagingResponse<T>(
+    val items: List<T>,
+    val page: Int?,
+    val limit: Int,
+    val nextCursor: String?,
+    val prevCursor: String?,
+    val hasNext: Boolean?,
+    val hasPrev: Boolean?,
+    val itemCount: Int
+)
+```
+
+### 3. Pagination in Service Layer
+
+Use `PagingService.paginate()` with handlers:
+
+```kt
+val pagingResult = pagingService.paginate(
+    request = request,
+    handlers = handlers,
+)
+
+// Convert entities to DTOs (required - never return entities)
+return pagingService.map(pagingResult) {
+    ChatGroupResponse.from(it)
+}
+```
+
+### 4. PagingHandlers Implementation
+
+Create `{domain}PagingHandlers` class in `{domain}.paging` package implementing 6 required methods:
+
+```kt
+interface PagingHandlers<T> {
+    fun getCursorFromResponse(data: T): String
+    fun findById(id: String): T
+    fun findAllByOrderByIdAsc(pageable: Pageable): List<T>
+    fun findAllByOrderByIdDesc(pageable: Pageable): List<T>
+    fun findAllByIdGreaterThanOrderByIdAsc(id: String, pageable: Pageable): List<T>
+    fun findAllByIdLessThanOrderByIdDesc(id: String, pageable: Pageable): List<T>
+}
+```
+
+**Important ID Convention**:
+- Use `id: String` in handler methods (external identifier)
+- Use `seq: Long` internally for sorting/comparison (internal PK, never exposed to API)
+
+<example title="PagingHandlers Implementation">
+
+```kt
+class ChatGroupPagingHandlers(
+    private val chatroomSeq: Long,
+    private val chatGroupQueryRepository: ChatGroupQueryRepository,
+) : PagingHandlers<ChatGroup> {
+
+    override fun getCursorFromResponse(data: ChatGroup): String {
+        return data.id
+    }
+
+    override fun findById(id: String): ChatGroup {
+        return chatGroupQueryRepository.findByChatGroupIdAndChatroomSeq(
+            chatGroupId = id, chatroomSeq = chatroomSeq
+        ) ?: throw ChatGroupNotFoundException()
+    }
+
+    override fun findAllByOrderByIdAsc(pageable: Pageable): List<ChatGroup> {
+        return chatGroupQueryRepository.findAllByChatroomSeqOrderBySeqAsc(
+            chatroomSeq = chatroomSeq, pageable = pageable
+        )
+    }
+
+    override fun findAllByOrderByIdDesc(pageable: Pageable): List<ChatGroup> {
+        return chatGroupQueryRepository.findAllByChatroomSeqOrderBySeqDesc(
+            chatroomSeq = chatroomSeq, pageable = pageable
+        )
+    }
+
+    override fun findAllByIdGreaterThanOrderByIdAsc(id: String, pageable: Pageable): List<ChatGroup> {
+        val item = chatGroupQueryRepository.findChatGroupEntityByIdAndChatroomSeq(
+            chatGroupId = id, chatroomSeq = chatroomSeq
+        ) ?: throw ChatGroupNotFoundException()
+        return chatGroupQueryRepository.findAllByChatroomSeqAndSeqGreaterThanOrderBySeqAsc(
+            chatroomSeq = chatroomSeq, seq = item.seq, pageable = pageable
+        )
+    }
+
+    override fun findAllByIdLessThanOrderByIdDesc(id: String, pageable: Pageable): List<ChatGroup> {
+        val item = chatGroupQueryRepository.findChatGroupEntityByIdAndChatroomSeq(
+            chatGroupId = id, chatroomSeq = chatroomSeq
+        ) ?: throw ChatGroupNotFoundException()
+        return chatGroupQueryRepository.findAllByChatroomSeqAndSeqLessThanOrderBySeqDesc(
+            chatroomSeq = chatroomSeq, seq = item.seq, pageable = pageable
+        )
+    }
+}
+```
+</example>
+
+---
+
+## Paginated Queries (Multiple Records)
+
+**Critical Rule**: Do NOT use 1:N fetch join with pagination - it distorts results.
+
+<bad-example>
+
+```kt
+// ❌ WRONG: Fetch join with pagination
+val chatrooms = queryFactory
+    .selectFrom(chatroom)
+    .leftJoin(chatroom.chatroomCharacters, chatroomCharacter).fetchJoin()
+    .offset(pageable.offset)
+    .limit(pageable.pageSize)
+    .fetch()
+```
+</bad-example>
+
+### Correct Approach: Two-Step Query
+
+**Step 1**: Query only identifiers with pagination (no fetch join)
+
+```kt
+val seqs = queryFactory
+    .select(chatGroup.seq)
+    .from(chatGroup)
+    .where(chatGroup.chatroom.seq.eq(chatroomSeq))
+    .orderBy(chatGroup.seq.asc())
+    .offset(pageable.offset)
+    .limit(pageable.pageSize.toLong())
+    .fetch()
+```
+
+**Step 2**: Fetch join using `IN` clause with collected identifiers
+
+```kt
+val query = queryFactory
+    .selectFrom(chatGroup)
+    .distinct()
+    .leftJoin(chatGroup.chatContentGroups, chatContentGroup).fetchJoin()
+    .where(chatGroup.seq.`in`(seqs))
+```
+
+<example title="Complete Paginated Query with Multi-Step Fetch Join">
+
+```kt
+fun findAllByChatroomSeqAndSeqGreaterThanOrderBySeqAsc(
+    chatroomSeq: Long,
+    seq: Long,
+    pageable: Pageable,
+): List<ChatGroup> {
+    // Step 1: Get identifiers only
+    val seqs = queryFactory
+        .select(chatGroup.seq)
+        .from(chatGroup)
+        .where(
+            chatGroup.chatroom.seq.eq(chatroomSeq),
+            chatGroup.seq.gt(seq),
+        )
+        .orderBy(chatGroup.seq.asc())
+        .offset(pageable.offset)
+        .limit(pageable.pageSize.toLong())
+        .fetch()
+
+    return findChatGroupsBySeqs(seqs, orderAsc = true)
+}
+
+private fun findChatGroupsBySeqs(
+    seqs: List<Long>,
+    orderAsc: Boolean,
+): List<ChatGroup> {
+    if (seqs.isEmpty()) return emptyList()
+
+    // Step 2a: First 1:N collection
+    val query = queryFactory
+        .selectFrom(chatGroup)
+        .distinct()
+        .leftJoin(chatGroup.chatroom, chatroom).fetchJoin()
+        .leftJoin(chatGroup.chatContentGroups, chatContentGroup).fetchJoin()
+        .where(chatGroup.seq.`in`(seqs))
+
+    val roots = if (orderAsc) {
+        query.orderBy(chatGroup.seq.asc()).fetch()
+    } else {
+        query.orderBy(chatGroup.seq.desc()).fetch()
+    }
+
+    // Step 2b: Second 1:N collection
+    queryFactory
+        .selectFrom(chatContentGroup)
+        .leftJoin(chatContentGroup.chatGroup, chatGroup)
+        .leftJoin(chatContentGroup.chatContents, chatContent).fetchJoin()
+        .leftJoin(chatContent.userProfile, chatContentUserProfile).fetchJoin()
+        .leftJoin(chatContent.character, character).fetchJoin()
+        .where(chatContentGroup.chatGroup.seq.`in`(seqs))
+        .fetch()
+
+    return roots
+}
+```
+</example>
+
+**Best Practice**: Reuse the `findBySeqs` method across all `findAll...` handler methods.
+
+---
+
+# CREATE Operations
+
+**Required**: `@Transactional` on service layer methods
+
+## Single Record Creation
+
+Define static factory method `create` in entity's `companion object`.
+
+**Rules**:
+- Entity creation logic (validation, invariants) belongs in Entity, not Service
+- For entity graphs (parent + children), creation responsibility stays in **Aggregate Root only**
+- Children do NOT recursively create their children
+- Use `cascade = [CascadeType.ALL]` or `[CascadeType.PERSIST]` for automatic child persistence
+
+<example title="Entity Creation Factory">
+
+```kt
+@OneToMany(
+    mappedBy = "chatContentGroup",
+    cascade = [CascadeType.ALL],
+    orphanRemoval = true,
+    fetch = FetchType.LAZY
+)
+val chatContents: MutableList<ChatContent> = mutableListOf()
+
+companion object {
+    fun create(
+        chatroom: Chatroom,
+        character: Character?,
+        userProfile: UserProfile,
+        message: String
+    ): ChatGroup {
+        val chatGroup = ChatGroup(chatroom = chatroom)
+
+        val chatContentGroup = ChatContentGroup(chatGroup = chatGroup)
+        chatGroup.chatContentGroups.add(chatContentGroup)
+
+        val chatContent = ChatContent(
+            chatContentGroup = chatContentGroup,
+            message = message,
+            isCharacter = character != null,
+            userProfile = userProfile,
+            character = character
+        )
+        chatContentGroup.chatContents.add(chatContent)
+
+        return chatGroup
+    }
+}
+```
+</example>
+
+Service layer usage:
+
+```kt
+val chatGroup = ChatGroup.create(
+    chatroom = chatroom,
+    character = character,
+    userProfile = userProfile,
+    message = request.message,
+)
+chatGroupRepository.save(chatGroup)
+```
+
+## Batch Insert
+
+Prefer single inserts for visibility and predictability. Batch insert is allowed **only for entities without relations**.
+
+**Rules**:
+- Entities with relations → Use `repository.saveAll()` (even if not batched)
+- Entities without relations + `IDENTITY` strategy → Use `{domain}JdbcRepository`
+
+### JdbcRepository Convention
+
+- Class name: `{domain}JdbcRepository`
+- Public method: `saveAll(entities: List<Entity>)`
+- Private method: `insert{Domain}s(entities: List<Entity>)`
+
+<example title="Batch Insert with JDBC">
+
+```kt
+@Repository
+class TodoJdbcRepository(
+    private val jdbcTemplate: JdbcTemplate,
+) {
+
+    @Transactional
+    fun saveAll(todos: List<TodoEntity>) {
+        if (todos.isEmpty()) return
+        insertTodos(todos)
+    }
+
+    private fun insertTodos(todos: List<TodoEntity>) {
+        jdbcTemplate.batchUpdate(
+            """
+            INSERT INTO todos
+                (id, title, description, is_completed, is_deleted, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """.trimIndent(),
+            object : BatchPreparedStatementSetter {
+                override fun setValues(ps: PreparedStatement, i: Int) {
+                    val todo = todos[i]
+                    ps.setString(1, todo.id)
+                    ps.setString(2, todo.title)
+                    ps.setString(3, todo.description)
+                    ps.setBoolean(4, todo.isCompleted)
+                    ps.setBoolean(5, todo.isDeleted)
+                    ps.setObject(6, todo.createdAt)
+                    ps.setObject(7, todo.updatedAt)
+                }
+                override fun getBatchSize(): Int = todos.size
+            }
+        )
+    }
+}
+```
+</example>
+
+**⚠️ Warning**: JdbcTemplate bypasses persistence context. Do NOT query or use entities in the same transaction after batch operations.
+
+---
+
+# UPDATE Operations
+
+**Required**: `@Transactional` on service layer methods
+
+## Single Record Update
+
+Use JPA dirty checking. Do NOT call `repository.save()` for managed entities.
+
+Delegate update logic to Entity, not Service:
+
+<example title="Entity Update Method">
+
+```kt
+// In Entity class
+fun update(
+    title: String?,
+    description: String?,
+    isCompleted: Boolean?,
+    tags: List<String>?
+) {
+    title?.let { this.title = it }
+    description?.let { this.description = it }
+    isCompleted?.let { this.isCompleted = it }
+
+    tags?.let {
+        val tagEntities = it.map { tagName ->
+            TagEntity(todo = this, name = tagName)
+        }
+        this.tags.clear()
+        this.tags.addAll(tagEntities)
+    }
+
+    this.updatedAt = LocalDateTime.now()
+}
+```
+</example>
+
+Service layer usage:
+
+```kt
+@Transactional
+fun updateTodo(id: String, request: UpdateTodoRequest): TodoResponse {
+    val todo = todosRepository.findByIdAndIsDeletedFalse(id)
+        ?: throw TodoNotFoundException()
+
+    todo.update(
+        request.title,
+        request.description,
+        request.isCompleted,
+        request.tags
+    )
+    return TodoResponse.from(todo, request.tags)
+}
+```
+
+## Batch Update
+
+### Case 1: Same Value for All Records
+
+Use JPQL with `@Modifying`:
+
+```kt
+@Modifying(clearAutomatically = true, flushAutomatically = true)
+@Query("""
+    update TodoEntity t
+    set t.isDeleted = true
+    where t.id in :ids
+""")
+fun softDeleteByIds(@Param("ids") ids: List<String>): Int
+```
+
+### Case 2: Different Values per Record
+
+Use `{domain}JdbcRepository` with native batch update:
+
+```kt
+fun batchDescriptionUpdate(request: UpdateTodosRequest): Int {
+    val todos = request.items
+    if (todos.isEmpty()) return 0
+
+    val updatedTime = LocalDateTime.now()
+
+    jdbcTemplate.batchUpdate(
+        """
+        UPDATE todos
+        SET description = ?, updated_at = ?
+        WHERE id = ?
+        """.trimIndent(),
+        object : BatchPreparedStatementSetter {
+            override fun setValues(ps: PreparedStatement, i: Int) {
+                val todo = todos[i]
+                ps.setString(1, todo.description)
+                ps.setObject(2, updatedTime)
+                ps.setString(3, todo.id)
+            }
+            override fun getBatchSize(): Int = todos.size
+        }
+    )
+    return todos.size
+}
+```
+
+**⚠️ Warning**: JdbcTemplate bypasses persistence context. Do NOT query or use entities in the same transaction after batch operations.
+
+---
+
+# DELETE Operations
+
+**Required**: `@Transactional` on service layer methods
+
+## Deletion Strategy Decision Tree
+
+1. Entity has `isDeleted` field → **Soft Delete**
+2. Entity has `isDeleted` field BUT developer explicitly requests hard delete → **Hard Delete**
+3. Entity has no `isDeleted` field → **Hard Delete**
+
+## Soft Delete
+
+Treat as UPDATE operation (set `isDeleted = true`).
+
+- Single record: Use dirty checking (same as single update)
+- Multiple records: Use JPQL bulk update (same as batch update Case 1)
+
+## Hard Delete
+
+Use JPQL with `@Modifying`:
+
+```kt
+@Modifying(clearAutomatically = true, flushAutomatically = true)
+@Query("""
+    delete from TodoEntity t
+    where t.id in :ids
+""")
+fun deleteByIds(@Param("ids") ids: List<String>): Int
+```
+
+---
+
+## Quick Reference Summary
+
+| Operation | Annotation | Method |
+|-----------|------------|--------|
+| SELECT | `@Transactional(readOnly = true)` | JPA/QueryDSL |
+| CREATE | `@Transactional` | `repository.save()` or JdbcRepository |
+| UPDATE | `@Transactional` | Dirty checking or JPQL/JdbcRepository |
+| DELETE (Soft) | `@Transactional` | Treat as UPDATE |
+| DELETE (Hard) | `@Transactional` | JPQL `@Modifying` |
+
+**Key Principles**:
+- Never expose `seq` (internal PK) to API - use `id` (String)
+- `findById` must be implemented manually (JPA default uses `seq`, not `id`)
+- Entity creation/update logic belongs in Entity, not Service
+- 1:N fetch join limit: 1 per query
+- Pagination + fetch join: Always use two-step query
+- JdbcTemplate: Never reuse entities in same transaction

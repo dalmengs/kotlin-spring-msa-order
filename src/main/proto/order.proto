@@ -1,0 +1,39 @@
+syntax = "proto3";
+
+package order;
+
+option java_multiple_files = true;
+option java_package = "com.example.order.grpc";
+option java_outer_classname = "OrderProto";
+
+service OrderService {
+  rpc FindOrder (FindOrderRequest)
+      returns (FindOrderResponse);
+}
+
+message FindOrderRequest {
+  string orderId = 1;
+  string userId  = 2;
+}
+
+enum OrderStatus {
+  ORDER_STATUS_UNSPECIFIED = 0;
+
+  CREATED = 1;
+  PAID    = 2;
+  FAILED  = 3;
+}
+
+message FindOrderResponse {
+  string orderId = 1;
+  string aggregateId = 2;
+  string userId = 3;
+
+  int64 amount = 4;
+
+  OrderStatus status = 5;
+
+  bool exists = 6;
+
+  string message = 7;
+}

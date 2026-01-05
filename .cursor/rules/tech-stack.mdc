@@ -1,0 +1,47 @@
+---
+alwaysApply: false
+---
+# Tech Stack Reference (Spring Boot + Kotlin)
+
+**Apply manually when AI needs repo tech context.**  
+(이 문서는 “이 저장소”의 기술 스택 기준입니다.)
+
+## Runtime / Language
+- **Java 17** (Gradle toolchain)
+- **Kotlin 2.x**
+- **Spring Boot 4.x**
+
+## Web / API
+- **Spring Web MVC**
+- **Jackson Kotlin module**
+- **Validation**: `spring-boot-starter-validation`
+- **API Response convention**: `BaseResponse<T>` envelope
+- **Error convention**: `BaseException` + `GlobalExceptionHandler`
+
+## Database
+- **PostgreSQL**
+- **Spring Data JPA (Hibernate)**
+- Entity convention:
+  - `seq: Long` = DB PK, auto-increment (internal only)
+  - `id: String` = external UUID (unique, exposed)
+  - `seq` is NEVER returned in response DTOs
+- **Soft delete** via `isDeleted`
+
+## Paging
+- Cursor paging is standardized via:
+  - `common/paging/PagingService.paginate(request, handlers)`
+  - domain-specific `{Domain}PagingHandlers`
+
+## Build / Dependency management
+- **Gradle Kotlin DSL**: `build.gradle.kts`
+
+## Testing
+- **JUnit Platform**
+- **Kotest**
+- **MockK**
+- **Spring MVC test** (`MockMvc`)
+- **springmockk** for Spring bean mocking
+
+## Configuration
+- `src/main/resources/application.yml`
+- `spring.jpa.open-in-view: false` (현재 설정 기준)

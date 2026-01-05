@@ -1,0 +1,150 @@
+---
+globs: src/main/kotlin/**,src/test/kotlin/**,src/main/resources/**,build.gradle.kts
+alwaysApply: false
+---
+# Backend Core Principles (Spring Boot + Kotlin)
+
+이 문서는 이 저장소의 **Kotlin Spring Boot 컨벤션을 강제**합니다. (This document enforces Kotlin Spring Boot conventions for this repo.)
+
+## 프로젝트 구조 / Project Structure
+
+### 도메인 단위 분리 (Domain-first)
+- **규칙**: 모든 코드는 도메인 기준으로 패키지를 분리합니다. (Separate packages by domain.)
+- **예시**: `todo/` 도메인을 참고합니다.
+
+```
+src/main/kotlin/com/dalmeng/convention/
+├── common/                     # 도메인 공통 (response/exception/paging)
+│   ├── response/
+│   ├── exception/
+│   └── paging/
+├── health/                     # 예시 도메인
+│   └── controller/
+└── {domain}/                   # 예: todo/
+    ├── controller/
+    ├── service/
+    ├── repository/
+    ├── entity/
+    ├── dto/
+    │   ├── request/
+    │   └── response/
+    ├── exception/
+    └── paging/                 # cursor paging handlers
+```
+
+### 도메인 내부 계층 폴더 강제 / Mandatory folders per domain
+- **MUST**: `{domain}/controller`, `{domain}/service`, `{domain}/repository`, `{domain}/entity`, `{domain}/dto`, `{domain}/exception`
+- **OPTIONAL (있으면 반드시 이 위치)**: `{domain}/paging`, `{domain}/config`, `{domain}/mapper`, `{domain}/event`
+
+## 의존성 방향 / Dependency Direction
+
+### 단방향 의존 / One-way dependency
+- **Controller → Service → Repository**
+- `entity/`는 JPA 영속 모델이며 **API 응답으로 직접 노출 금지** (Never expose entities directly to API).
+- `dto/`는 API 경계 모델이며, 최소한 **request/response를 분리**합니다.
+
+## HTTP 응답 규칙 / HTTP Response Rules
+
+### BaseResponse 강제 / Always wrap with BaseResponse
+- **MUST**: 컨트롤러 반환 타입은 항상 `BaseResponse<T>` 입니다.
+- **MUST**: 성공 응답은 `BaseResponse.ok(data = ...)`를 사용합니다.
+- **MUST NOT**: 컨트롤러에서 `TodoEntity` 같은 entity를 그대로 반환하지 않습니다.
+
+참고 구현: `com.dalmeng.convention.common.response.BaseResponse`
+
+## 오류/예외 규칙 / Error & Exception Rules
+
+### BaseException 강제 / Domain exceptions must extend BaseException
+- **MUST**: 모든 “의도된” 비즈니스 오류는 `BaseException(statusCode, message)`를 상속합니다.
+- **MUST**: 도메인 종속 예외는 `{domain}/exception/`에 정의합니다. (e.g. `TodoNotFoundException`)
+- **MUST**: 예외를 HTTP 응답으로 변환하는 책임은 `GlobalExceptionHandler`가 집니다.
+- **MUST NOT**: 컨트롤러/서비스에서 의미 없는 `try/catch`로 감싸지 않습니다. (Let the handler convert exceptions.)
+
+참고 구현:
+- `common/exception/BaseException.kt`
+- `common/exception/GlobalExceptionHandler.kt`
+
+## REST API 컨벤션 / REST Conventions
+
+### HTTP Method 원칙 / Method semantics
+- **조회**: `GET`
+- **생성**: `POST`
+- **부분 수정**: `PATCH` (원칙: partial update)
+- **삭제**: `DELETE`
+
+### 리소스 ID 전달 / Resource id in path
+- **MUST**: 리소스 id는 항상 path variable로 받습니다. `@PathVariable id: String`
+- **PATCH**: `@PathVariable id` + `@RequestBody Update...Request` 조합이 기본이며, body 필드는 nullable로 설계해 부분 수정이 가능해야 합니다.
+
+## 데이터베이스 & Entity 컨벤션 / Database & Entity Conventions
+
+### PK/ID 규칙 (보안 포함) / seq vs id (security)
+- **MUST**: 엔티티는 다음 2개 식별자를 가집니다.
+  - `seq: Long` = DB 내부 PK, auto increment, not null
+  - `id: String` = 외부 노출용 UUID, not null, unique
+- **MUST NOT**: `seq`는 **절대로 response DTO에 포함하지 않습니다.** (Security: never expose DB PK.)
+- **MUST**: 외부(클라이언트)는 오직 `id`로만 리소스를 조회/수정/삭제합니다.
+
+참고 구현: `todo/entity/TodoEntity.kt`
+
+### Soft delete 규칙 / Soft delete
+- **MUST**: 삭제는 hard delete 대신 soft delete (`isDeleted = true`)를 사용합니다.
+- **MUST**: 모든 조회 쿼리는 기본적으로 `isDeleted = false` 조건을 포함합니다.
+
+## Repository 컨벤션 / Repository Conventions (Spring Data JPA)
+
+### 기본 원칙 / Basics
+- **MUST**: `interface XRepository : JpaRepository<XEntity, Long>`
+  - `Long`은 `seq`의 타입입니다.
+- **MUST**: 외부 식별자인 `id: String` 기반 조회 메서드를 별도로 제공합니다.
+  - 예: `findByIdAndIsDeletedFalse(id: String): XEntity?`
+
+### Paging을 위한 메서드 네이밍 / Methods used by paging handlers
+Cursor paging을 위해 아래 형태의 메서드가 필요합니다(도메인별로 이름/필드만 바뀜):
+- `findAllByIsDeletedFalseOrderBySeqAsc(pageable: Pageable): List<XEntity>`
+- `findAllByIsDeletedFalseOrderBySeqDesc(pageable: Pageable): List<XEntity>`
+- `findAllByIsDeletedFalseAndSeqGreaterThanOrderBySeqAsc(seq: Long, pageable: Pageable): List<XEntity>`
+- `findAllByIsDeletedFalseAndSeqLessThanOrderBySeqDesc(seq: Long, pageable: Pageable): List<XEntity>`
+
+참고 구현: `todo/repository/TodoRepository.kt`
+
+## Service 컨벤션 / Service Conventions
+
+### 트랜잭션 / Transactions
+- **MUST**: 데이터 변경(create/update/delete)은 `@Transactional`로 감쌉니다.
+- **SHOULD**: read-only 작업은 트랜잭션을 생략하거나(현재 코드 스타일), 필요 시 readOnly 트랜잭션을 고려합니다.
+
+### ID 생성 / External id generation
+- **MUST**: 외부 노출 id는 `UUID.randomUUID().toString()`으로 생성합니다.
+
+## Paging 컨벤션 (핵심) / Paging Conventions (critical)
+
+이 프로젝트는 `common/paging/PagingService.paginate()`를 통해 **cursor 기반 페이징을 표준화**합니다.
+
+### 구현 규칙 / Implementation rules
+- **MUST**: 도메인마다 `{Domain}PagingHandlers`를 만들고 `PagingHandlers<ResponseDto>`를 구현합니다.
+- **MUST**: cursor는 응답 DTO의 `id`를 사용합니다. (`getCursorFromResponse(data) = data.id`)
+- **MUST**: `id`(uuid)는 정렬 기준이 아니므로, 실제 “다음/이전” 비교는 **seq**로 수행합니다.
+  - handlers 내부에서 `id → entity(seq)`로 변환 후 `seqGreaterThan/seqLessThan` 쿼리를 호출합니다.
+
+### 사용 규칙 / Usage rules
+- **MUST**: Service 계층에서 다음 형태로 호출합니다.
+
+```kotlin
+val handlers = TodoPagingHandlers(todoRepository)
+return pagingService.paginate(
+  request = request,
+  handlers = handlers,
+)
+```
+
+참고 구현:
+- `common/paging/*`
+- `todo/paging/TodoPagingHandlers.kt`
+- `todo/service/TodoService.kt`
+
+## 금지 사항 / Non-negotiables
+- **NO entity exposure**: Entity를 API로 직접 반환 금지.
+- **NO seq exposure**: Response DTO에 `seq` 포함 금지.
+- **NO controller try/catch**: 컨트롤러에서 의미 없는 try/catch 금지.
+- **DO domain exceptions**: 도메인 오류는 반드시 `{domain}/exception`에 정의 + `BaseException` 상속.

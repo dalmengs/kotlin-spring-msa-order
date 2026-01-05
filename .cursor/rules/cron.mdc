@@ -1,0 +1,46 @@
+---
+globs: **/*Scheduler.kt,**/*Cron*.kt
+alwaysApply: false
+---
+# Scheduler / Cron Patterns (Spring Boot + Kotlin)
+
+Applied to: `**/*Scheduler.kt`, `**/*Cron*.kt`.
+
+## 기본 원칙 / Core principles
+- **MUST**: 스케줄러는 “서비스/컨트롤러와 분리된” 클래스에서 실행합니다.  
+  (Separate scheduled jobs from controllers/services.)
+- **MUST**: 잡은 idempotent(여러 번 실행돼도 안전)하게 설계합니다.
+- **MUST**: 예외로 인해 스케줄러 스레드가 죽지 않도록 `try/catch`로 보호합니다.
+
+## Spring Scheduling 사용 / Using Spring Scheduling
+- **MUST**: 스케줄링을 사용할 경우, 설정에서 `@EnableScheduling`을 활성화합니다.
+- **Use**: `@Scheduled(cron = "...")`, `@Scheduled(fixedDelayString = "...")`
+
+예시:
+```kotlin
+@Component
+class ExampleScheduler(
+    private val someService: SomeService,
+) {
+    private val logger = LoggerFactory.getLogger(ExampleScheduler::class.java)
+
+    @Scheduled(cron = "0 */10 * * * *") // every 10 minutes
+    fun runEveryTenMinutes() {
+        try {
+            someService.doWork()
+        } catch (e: Exception) {
+            logger.error("Scheduler failed", e)
+        }
+    }
+}
+```
+
+## 실행 시간/중복 실행 / Overlap and multi-instance
+- 단일 인스턴스에서는 위 패턴으로 충분합니다.
+- **NOTE**: 멀티 인스턴스(여러 서버) 환경에서는 분산 락(예: ShedLock)이 필요할 수 있습니다.  
+  (If multi-instance, consider distributed lock.)
+
+## Key Rules
+- ✅ `@Scheduled` 사용, 잡 로직은 idempotent
+- ✅ try/catch + logging
+- ✅ 서비스는 “작업 메서드”로만 제공하고, 스케줄러가 orchestration

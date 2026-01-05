@@ -1,0 +1,94 @@
+---
+globs: **/*Request.kt,**/*Response.kt,**/dto/**/*.kt
+alwaysApply: false
+---
+# API DTO Patterns (Spring Boot + Kotlin)
+
+Applied to: `**/dto/**/*.kt`, `**/*Request.kt`, `**/*Response.kt`.
+
+## DTO 폴더 구조 / DTO folder layout
+- **MUST**: 도메인 하위에 `dto/request`, `dto/response`를 둡니다.
+
+예시 (todo):
+```
+todo/dto/
+├── request/
+│   ├── CreateTodoRequest.kt
+│   └── UpdateTodoRequest.kt
+└── response/
+    └── TodoResponse.kt
+```
+
+## Request DTO 규칙 / Request DTO rules
+
+### Create Request
+- **MUST**: 생성 요청은 필요한 필드를 non-null로 둡니다.
+- **SHOULD**: Validation을 사용한다면 `spring-boot-starter-validation` 기반으로 `@field:NotBlank`, `@field:Size` 같은 애노테이션을 사용합니다.
+
+예시:
+```kotlin
+data class CreateTodoRequest(
+    val title: String,
+    val description: String?,
+)
+```
+
+### Patch(Update) Request (부분 수정)
+- **MUST**: PATCH 요청 DTO는 “부분 수정”을 위해 **모든 필드를 nullable**로 둡니다.
+- **MUST**: 서비스/엔티티 update 로직은 nullable을 받아 `?.let {}`로 반영합니다.
+
+예시:
+```kotlin
+data class UpdateTodoRequest(
+    val title: String?,
+    val description: String?,
+    val isCompleted: Boolean?,
+)
+```
+
+## Response DTO 규칙 / Response DTO rules
+- **MUST**: Response DTO는 API에 노출 가능한 필드만 담습니다.
+- **MUST NOT**: DB 내부 PK인 `seq`는 절대 포함하지 않습니다. (Security)
+- **MUST**: Entity → Response 변환은 `companion object { fun from(entity) }` 패턴을 사용합니다.
+- **MUST NOT**: Response DTO 안에 JPA Entity를 중첩해서 넣지 않습니다.
+
+예시 (todo):
+```kotlin
+data class TodoResponse(
+    val id: String,
+    val title: String,
+    val description: String?,
+    val isCompleted: Boolean,
+    val createdAt: LocalDateTime,
+    val updatedAt: LocalDateTime,
+) {
+    companion object {
+        fun from(todoEntity: TodoEntity): TodoResponse =
+            TodoResponse(
+                id = todoEntity.id,
+                title = todoEntity.title,
+                description = todoEntity.description,
+                isCompleted = todoEntity.isCompleted,
+                createdAt = todoEntity.createdAt,
+                updatedAt = todoEntity.updatedAt,
+            )
+    }
+}
+```
+
+## Query DTO / Paging request
+- **MUST**: 페이징 요청은 공통 `BasePagingRequest`를 사용합니다.
+- **MUST**: 컨트롤러에서는 `@ModelAttribute`로 바인딩합니다.
+
+참고 구현: `common/paging/BasePagingRequest.kt`
+
+## Naming rules
+- **Request**: `CreateXRequest`, `UpdateXRequest`
+- **Response**: `XResponse`, 목록은 `List<XResponse>`로 감싸고 추가 envelope는 `BaseResponse`가 담당
+
+## Key Rules (요약)
+- ✅ 도메인별 `dto/request`, `dto/response` 분리
+- ✅ PATCH request는 nullable 필드
+- ✅ Response DTO에 `seq` 절대 포함 금지
+- ✅ Entity → Response는 `companion object from()`로 매핑
+- ❌ Entity 직접 반환 금지

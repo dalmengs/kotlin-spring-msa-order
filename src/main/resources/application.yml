@@ -1,0 +1,50 @@
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/convention
+    username: dalmeng
+    password: dalmeng
+    driver-class-name: org.postgresql.Driver
+
+  kafka:
+    bootstrap-servers: localhost:9092
+
+    consumer:
+      group-id: order-service
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+
+    listener:
+      ack-mode: RECORD
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          batch_size: 50
+        format_sql: true
+        show_sql: true
+        order_inserts: true
+        order_updates: true
+
+
+logging:
+  level:
+    org.hibernate.SQL: debug
+    org.springframework.jdbc: debug
+
+server:
+  port:
+    8082
+
+grpc:
+  client:
+    wallet:
+      address: "static://localhost:9090"
+      negotiationType: plaintext
+  server:
+    port: 9091
+

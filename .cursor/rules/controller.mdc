@@ -1,0 +1,91 @@
+---
+globs: **/*Controller.kt
+alwaysApply: false
+---
+# Controller Patterns (Spring MVC + Kotlin)
+
+Applied to: `**/*Controller.kt` files.
+
+## 핵심 규칙 / Core Rules
+- **MUST**: 컨트롤러는 도메인 패키지의 `controller/` 폴더에 둡니다. (Put controllers under `{domain}/controller`.)
+- **MUST**: `@RestController` + `@RequestMapping("/resources")`를 사용합니다.
+- **MUST**: 모든 응답은 `BaseResponse<T>`로 감쌉니다. (`BaseResponse.ok(...)`)
+- **MUST**: 컨트롤러에 비즈니스 로직을 두지 않습니다. (Controllers are thin.)
+- **MUST**: 컨트롤러에 의미 없는 try/catch를 두지 않습니다. (Let `GlobalExceptionHandler` handle.)
+- **MUST**: 리소스 식별자는 path로 받습니다. (`@PathVariable id: String`)
+- **MUST NOT**: DB PK인 `seq`를 API에 노출하거나 입력으로 받지 않습니다.
+
+## 표준 컨트롤러 템플릿 / Standard template
+
+```kotlin
+@RestController
+@RequestMapping("/todos")
+class TodoController(
+    private val todoService: TodoService
+) {
+    @PostMapping
+    fun createTodo(@RequestBody request: CreateTodoRequest): BaseResponse<TodoResponse> =
+        BaseResponse.ok(data = todoService.createTodo(request))
+
+    @GetMapping
+    fun getTodos(): BaseResponse<List<TodoResponse>> =
+        BaseResponse.ok(data = todoService.getTodos())
+
+    @GetMapping("/{id}")
+    fun getTodo(@PathVariable id: String): BaseResponse<TodoResponse> =
+        BaseResponse.ok(data = todoService.getTodo(id))
+}
+```
+
+참고 구현: `todo/controller/TodoController.kt`
+
+## REST 엔드포인트 규칙 / Endpoint rules
+
+### 조회 / Read (GET)
+- **Collection**: `GET /{resources}`
+- **Single**: `GET /{resources}/{id}`
+- **MUST**: `id`는 UUID string입니다. (Do not accept/use `seq`.)
+
+### 생성 / Create (POST)
+- `POST /{resources}`
+- **MUST**: request body는 `dto/request/*Request`로 정의합니다.
+
+### 부분 수정 / Partial update (PATCH)
+- `PATCH /{resources}/{id}`
+- **MUST**: `@PathVariable id` + `@RequestBody Update...Request`
+- **MUST**: Patch request의 필드는 nullable로 설계합니다(부분 수정 강제).
+
+예시 (todo):
+```kotlin
+@PatchMapping("/{id}")
+fun updateTodo(
+    @PathVariable id: String,
+    @RequestBody request: UpdateTodoRequest,
+): BaseResponse<TodoResponse> =
+    BaseResponse.ok(data = todoService.updateTodo(id, request))
+```
+
+### 삭제 / Delete (DELETE)
+- `DELETE /{resources}/{id}`
+- **MUST**: hard delete 금지. 서비스는 soft delete를 수행합니다. (Use `isDeleted=true`.)
+
+## Paging 컨벤션 / Paging conventions
+
+### 엔드포인트 형태 / Endpoint shape
+- **MUST**: Paging 전용 endpoint를 분리합니다: `GET /{resources}/page`
+
+### 요청 바인딩 / Request binding
+- **MUST**: `@ModelAttribute pagingRequest: BasePagingRequest`
+
+예시 (todo):
+```kotlin
+@GetMapping("/page")
+fun getTodosPaging(
+    @ModelAttribute pagingRequest: BasePagingRequest,
+): BaseResponse<PagingResponse<TodoResponse>> =
+    BaseResponse.ok(data = todoService.getTodosPaging(pagingRequest))
+```
+
+## 금지 사항 / Anti-patterns
+- **NO entity exposure**: `TodoEntity` 같은 entity를 response로 반환 금지.
+- **NO seq usage**: `seq`를 path/query/body로 받지 않습니다.

@@ -1,0 +1,109 @@
+---
+globs: **/*Service.kt
+alwaysApply: false
+---
+# Service Layer Patterns (Spring Boot + Kotlin)
+
+Applied to: `**/*Service.kt` files.
+
+## 핵심 책임 / Responsibilities
+- **Service = 유스케이스(Use-case) 단위 비즈니스 로직**을 담당합니다.
+- **Controller는 얇게**, Service가 데이터를 만들고/검증하고/저장하고/DTO로 변환합니다.
+- **Repository는 DB 접근만** 담당합니다. (No business logic in repositories.)
+
+## 의존성 / Dependencies
+- **MUST**: Service는 `@Service`로 선언하고, 생성자 주입을 사용합니다.
+- **MUST**: Service는 Repository/JPA Entity를 “직접 응답으로” 노출하지 않습니다.
+- **MUST**: Service는 응답 모델로 `{domain}/dto/response/*Response`를 반환합니다.
+
+## 트랜잭션 / Transactions
+- **MUST**: create/update/delete(상태 변경)는 `@Transactional`을 붙입니다.
+- **MUST**: 트랜잭션 범위 안에서 엔티티를 변경하고, DTO 변환을 마칩니다.
+- **MUST NOT**: 컨트롤러에서 `@Transactional`을 사용하지 않습니다.
+
+예시 (todo):
+```kotlin
+@Service
+class TodoService(
+    private val todoRepository: TodoRepository,
+    private val pagingService: PagingService,
+) {
+    @Transactional
+    fun createTodo(request: CreateTodoRequest): TodoResponse {
+        val todo = TodoEntity(
+            id = UUID.randomUUID().toString(),
+            title = request.title,
+            description = request.description,
+        )
+        val saved = todoRepository.save(todo)
+        return TodoResponse.from(saved)
+    }
+}
+```
+
+## 식별자 / Identifiers (id vs seq)
+- **MUST**: 외부 API 식별자는 항상 `id: String(UUID)` 입니다.
+- **MUST**: Service는 UUID를 생성할 때 `UUID.randomUUID().toString()`을 사용합니다.
+- **MUST NOT**: `seq`를 입력으로 받거나 response DTO에 포함하지 않습니다.
+
+## Soft delete 규칙 / Soft delete
+- **MUST**: 삭제는 hard delete 대신 `entity.delete()`로 soft delete 처리합니다.
+- **MUST**: 조회는 항상 `isDeleted = false` 조건을 사용합니다.
+- **MUST**: “없음(not found)”은 도메인 예외로 처리합니다. (e.g. `TodoNotFoundException`)
+
+예시 (todo):
+```kotlin
+@Transactional
+fun deleteTodo(id: String): TodoResponse {
+    val todo = todoRepository.findByIdAndIsDeletedFalse(id) ?: throw TodoNotFoundException()
+    todo.delete()
+    return TodoResponse.from(todo)
+}
+```
+
+## Patch(부분 수정) 규칙 / Partial update
+- **MUST**: Patch request DTO는 nullable 필드로 구성합니다.
+- **MUST**: 엔티티의 `update(title, description, ...)`는 nullable을 받아서 `?.let {}`로 부분 반영합니다.
+
+예시 (todo):
+```kotlin
+@Transactional
+fun updateTodo(id: String, request: UpdateTodoRequest): TodoResponse {
+    val todo = todoRepository.findByIdAndIsDeletedFalse(id) ?: throw TodoNotFoundException()
+    todo.update(request.title, request.description, request.isCompleted)
+    return TodoResponse.from(todo)
+}
+```
+
+## Paging 규칙 / Paging (cursor paging)
+
+### 구현 / Implementation
+- **MUST**: 도메인별로 `{Domain}PagingHandlers`를 구현합니다.
+- **MUST**: Service는 `PagingService.paginate(request, handlers)`를 통해 페이징을 처리합니다.
+- **MUST**: handlers는 응답 DTO 타입으로 구현합니다. `PagingHandlers<TodoResponse>`
+
+### 사용 / Usage
+예시 (todo, 현재 코드 표준):
+```kotlin
+fun getTodosPaging(request: BasePagingRequest): PagingResponse<TodoResponse> {
+    val handlers = TodoPagingHandlers(todoRepository)
+    return pagingService.paginate(
+        request = request,
+        handlers = handlers,
+    )
+}
+```
+
+## Error handling
+- **MUST NOT**: Service에서 의미 없는 try/catch를 쓰지 않습니다.
+- **MUST**: 의도된 오류는 `BaseException`을 상속하는 도메인 예외로 던집니다.
+- **MUST**: HTTP 변환은 `GlobalExceptionHandler`가 책임집니다.
+
+## Key Rules (요약)
+- ✅ `@Service` + 생성자 주입
+- ✅ 변경 로직은 `@Transactional`
+- ✅ UUID `id`만 외부에 노출, `seq`는 절대 노출 금지
+- ✅ soft delete 기본, 조회는 `isDeleted=false`
+- ✅ paging은 `PagingService.paginate(request, handlers)`
+- ❌ 컨트롤러/서비스에서 try/catch 남발 금지
+- ❌ entity 직접 응답 금지

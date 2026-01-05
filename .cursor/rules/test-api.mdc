@@ -1,0 +1,65 @@
+---
+globs: **/*IntegrationTest.kt,**/*ControllerTest.kt,**/*WebMvcTest.kt
+alwaysApply: false
+---
+# API Integration / Web MVC Testing Patterns (Spring Boot + Kotlin)
+
+Applied to: `**/*IntegrationTest.kt`, `**/*ControllerTest.kt`, `**/*WebMvcTest.kt`.
+
+## 테스트 위치 / Location
+- **MUST**: 테스트 코드는 `src/test/kotlin/...` 하위에 둡니다.
+- **SHOULD**: 도메인 패키지 구조를 그대로 따라갑니다.  
+  (Mirror production package structure.)
+
+## 테스트 레벨 / Test levels
+
+### 1) Controller(Web MVC) 테스트 (fast)
+- **Use**: `@WebMvcTest(YourController::class)` + `MockMvc`
+- **Mock**: Service는 `@MockkBean` (springmockk)로 mocking
+- **Assert**: 응답은 항상 `BaseResponse` envelope 기준으로 검증  
+  (`$.statusCode`, `$.message`, `$.data`)
+
+### 2) 통합 테스트 (slower, end-to-end-ish)
+- **Use**: `@SpringBootTest` + `@AutoConfigureMockMvc`
+- **DB**: 필요한 경우 Testcontainers/embedded DB를 사용(프로젝트 상황에 맞춰 추가)
+
+## BaseResponse 검증 규칙 / BaseResponse assertions
+- **MUST**: 성공 응답은 `data`를 기준으로 assert 합니다.
+- **MUST**: 오류 응답은 `statusCode`와 `message`를 기준으로 assert 합니다.
+
+예시(컨트롤러 테스트):
+```kotlin
+@WebMvcTest(TodoController::class)
+class TodoControllerTest(
+    private val mockMvc: MockMvc,
+) : DescribeSpec({
+    describe("GET /todos/{id}") {
+        it("returns BaseResponse with data") {
+            // given: service mock
+            // whenever(todoService.getTodo("...")).thenReturn(...)
+
+            // when/then
+            mockMvc.perform(get("/todos/{id}", "some-uuid"))
+                .andExpect(status().isOk)
+                .andExpect(jsonPath("$.statusCode").value(200))
+                .andExpect(jsonPath("$.data.id").value("some-uuid"))
+        }
+    }
+})
+```
+
+## Paging API 테스트 규칙 / Paging assertions
+- **MUST**: `/.../page` endpoint를 테스트합니다.
+- **MUST**: `PagingResponse`의 다음 필드 중심으로 검증합니다:
+  - `items`
+  - `limit`
+  - `itemCount`
+  - `nextCursor` / `prevCursor`
+  - `hasNext` / `hasPrev`
+- **MUST NOT**: 이 프로젝트 컨벤션 상 `totalPages/total` 같은 필드를 기대하지 않습니다.
+
+## Key Rules
+- ✅ Controller 테스트는 `@WebMvcTest` + `MockMvc` + `@MockkBean`
+- ✅ Integration은 `@SpringBootTest` + `@AutoConfigureMockMvc`
+- ✅ 항상 BaseResponse envelope로 검증
+- ✅ paging은 `PagingResponse` 필드로만 검증
