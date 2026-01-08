@@ -23,6 +23,21 @@ class PagingService {
                 val rest = limit - half
                 val cursor = request.cursor!!
 
+                if (limit == 1) {
+                    val center = handlers.findById(cursor)
+
+                    return PagingResponse(
+                        items = listOfNotNull(center),
+                        hasPrev = true,
+                        hasNext = true,
+                        prevCursor = handlers.getCursorFromResponse(center),
+                        nextCursor = handlers.getCursorFromResponse(center),
+                        limit = limit,
+                        page = null,
+                        itemCount = 1
+                    )
+                }
+
                 val upper = handlers.findAllByIdLessThanOrderByIdDesc(
                     cursor,
                     PageRequest.of(0, half + 1, Sort.by("id").descending())
@@ -61,7 +76,7 @@ class PagingService {
                     handlers.findAllByOrderByIdDesc(
                         PageRequest.of(
                             page - 1,
-                            limit + 1,
+                            limit,
                             Sort.by("id").descending()
                         )
                     )
@@ -93,7 +108,7 @@ class PagingService {
                     handlers.findAllByOrderByIdAsc(
                         PageRequest.of(
                             page - 1,
-                            limit + 1,
+                            limit,
                             Sort.by("id").ascending()
                         )
                     )
@@ -114,7 +129,7 @@ class PagingService {
                     prevCursor = null,
                     nextCursor = items.lastOrNull()?.let(handlers::getCursorFromResponse),
                     limit = limit,
-                    page = null,
+                    page = if (isPageRequest) request.page else null,
                     itemCount = items.size
                 )
             }

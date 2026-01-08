@@ -57,6 +57,10 @@ class Order(
             userId: String,
             amount: Long,
         ): Order {
+            require(amount in 0..1_000_000) {
+                "Amount must be between 0 and 1_000_000"
+            }
+
             val orderId = Utils.generateRandomId()
             return Order(
                 orderId = orderId,
