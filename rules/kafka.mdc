@@ -1,0 +1,469 @@
+---
+alwaysApply: true
+---
+
+# Kafka Event Patterns (Spring Boot + Kotlin)
+
+This rule defines Kafka event publishing and consumption patterns for Spring Boot applications using Kotlin.
+
+---
+
+## AI Behavior Guidelines
+
+When implementing Kafka event handling, you MUST:
+
+1. **Identify the operation type first**: Event Publishing or Event Consumption
+2. **Follow the corresponding convention** for that operation type
+3. **If the task doesn't fit any defined flow**, do NOT write code. Instead:
+   - Propose an implementation approach following convention principles
+   - Explain your reasoning in detail
+   - Wait for developer confirmation before proceeding
+
+---
+
+## Configuration
+
+### Application Configuration
+
+- **MUST**: Configure Kafka settings in `application.yml`.
+- **MUST**: Use `StringSerializer` and `StringDeserializer` for key and value.
+- **SHOULD**: Set `auto-offset-reset: earliest` for development, `latest` for production.
+
+<example title="Kafka Configuration in application.yml">
+
+```yaml
+spring:
+  kafka:
+    bootstrap-servers: localhost:9092
+    
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+    
+    consumer:
+      group-id: order-service
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    
+    listener:
+      ack-mode: RECORD
+```
+</example>
+
+### Dependencies
+
+- **MUST**: Include `spring-boot-starter-kafka` in `build.gradle.kts`.
+- **MUST**: Include `jackson-module-kotlin` for JSON serialization.
+
+---
+
+## Project Structure
+
+### Package Layout
+
+- **MUST**: Place Kafka-related code under `{domain}.kafka` package.
+- **MUST**: Organize files as follows:
+
+```
+{domain}/kafka/
+├── event/              # Event data classes
+│   └── XEvent.kt
+├── KafkaTopics.kt      # Topic name constants
+└── KafkaXConsumer.kt   # Event consumers
+```
+
+---
+
+## Event Definitions
+
+### Event Data Classes
+
+- **MUST**: Define event classes as `data class` in `kafka/event/` package.
+- **MUST**: Use immutable data classes with clear field names.
+- **SHOULD**: Include all necessary context for event processing.
+- **MUST NOT**: Do not include JPA entities or database-specific fields (e.g., `seq`).
+
+<example title="Event Data Class">
+
+```kt
+package com.dalmeng.convention.kafka.event
+
+data class WalletDebitedEvent(
+    val userId: String,
+    val orderId: String,
+    val amount: Long,
+    val timestamp: Long = System.currentTimeMillis(),
+)
+```
+</example>
+
+### Event Naming
+
+- **MUST**: Use past-tense verbs: `XCreated`, `XUpdated`, `XDeleted`, `XDebited`.
+- **MUST**: Follow domain-specific naming: `WalletDebitedEvent`, `OrderCreatedEvent`.
+- **SHOULD**: Be descriptive and self-documenting.
+
+---
+
+## Topic Definitions
+
+### Topic Constants
+
+- **MUST**: Define topic names in `kafka/KafkaTopics.kt` (or domain-specific topic objects).
+- **MUST**: Use `object` with `const val` for topic names.
+- **MUST**: Follow naming convention: `{domain}.{action}` (e.g., `wallet.debited`, `order.created`).
+
+<example title="Topic Definitions">
+
+```kt
+package com.dalmeng.convention.kafka
+
+object WalletTopics {
+    const val PAYMENT_WALLET_DEBITED = "wallet.debited"
+    const val PAYMENT_WALLET_CREDITED = "wallet.credited"
+}
+
+object OrderTopics {
+    const val ORDER_CREATED = "order.created"
+    const val ORDER_CANCELLED = "order.cancelled"
+}
+```
+</example>
+
+### Topic Naming Convention
+
+- **MUST**: Use lowercase with dots as separators.
+- **MUST**: Follow pattern: `{domain}.{action}`.
+- **SHOULD**: Use past-tense verbs for actions.
+- **MUST NOT**: Avoid underscores or hyphens in topic names.
+
+---
+
+## Event Publishing
+
+### KafkaTemplate Injection
+
+- **MUST**: Inject `KafkaTemplate<String, String>` via constructor.
+- **MUST**: Use `KafkaTemplate` for sending events.
+
+<example title="Service with Event Publishing">
+
+```kt
+@Service
+class OrderService(
+    private val orderRepository: OrderRepository,
+    private val kafkaTemplate: KafkaTemplate<String, String>,
+    private val objectMapper: ObjectMapper,
+) {
+    @Transactional
+    fun createOrder(userId: String, request: CreateOrderRequest): OrderResponse {
+        val order = Order.create(userId, request)
+        orderRepository.save(order)
+
+        // Publish event
+        val event = OrderCreatedEvent(
+            userId = userId,
+            orderId = order.id,
+            amount = order.totalAmount,
+        )
+        val eventJson = objectMapper.writeValueAsString(event)
+        
+        kafkaTemplate.send(
+            topic = OrderTopics.ORDER_CREATED,
+            key = order.id,
+            data = eventJson
+        )
+
+        return OrderResponse.from(order)
+    }
+}
+```
+</example>
+
+### Publishing Pattern
+
+- **MUST**: Serialize event to JSON using `ObjectMapper`.
+- **MUST**: Use event's aggregate ID (or relevant identifier) as the Kafka message key.
+- **SHOULD**: Send events after successful database transaction commit.
+- **MUST NOT**: Do not publish events if the transaction fails.
+
+### Key Selection
+
+- **MUST**: Use the aggregate root ID as the message key for event ordering.
+- **SHOULD**: Use `userId` for user-scoped events when ordering by user is important.
+- **MUST NOT**: Do not use random or null keys (affects partitioning and ordering).
+
+---
+
+## Event Consumption
+
+### Consumer Class Structure
+
+- **MUST**: Name consumer classes as `Kafka{Domain}Consumer.kt`.
+- **MUST**: Place consumers in `kafka/` package.
+- **MUST**: Annotate class with `@Component`.
+- **MUST**: Inject `ObjectMapper` and required services via constructor.
+
+<example title="Standard Consumer Template">
+
+```kt
+package com.dalmeng.convention.kafka
+
+import com.dalmeng.convention.kafka.event.WalletDebitedEvent
+import com.dalmeng.convention.order.service.OrderService
+import org.springframework.kafka.annotation.KafkaListener
+import org.springframework.stereotype.Component
+import tools.jackson.databind.ObjectMapper
+
+@Component
+class KafkaWalletConsumer(
+    private val objectMapper: ObjectMapper,
+    private val orderService: OrderService,
+) {
+    @KafkaListener(
+        topics = ["wallet.debited"],
+        groupId = "order-service"
+    )
+    fun consume(message: String) {
+        try {
+            val event = objectMapper.readValue(
+                message,
+                WalletDebitedEvent::class.java
+            )
+
+            orderService.markOrderAsPaid(event.userId, event.orderId)
+
+        } catch (e: Exception) {
+            throw e
+        }
+    }
+}
+```
+</example>
+
+### Consumer Method Requirements
+
+- **MUST**: Annotate consumer method with `@KafkaListener`.
+- **MUST**: Specify `topics` array and `groupId` in annotation.
+- **MUST**: Accept message as `String` (deserialized by Spring Kafka).
+- **MUST**: Deserialize JSON to event class using `ObjectMapper`.
+- **MUST**: Wrap processing logic in try/catch for error handling.
+
+### Error Handling
+
+- **MUST**: Catch exceptions to prevent consumer thread death.
+- **SHOULD**: Log errors with full context (event data, exception details).
+- **SHOULD**: Consider dead-letter queue (DLQ) for failed messages.
+- **MUST NOT**: Never swallow exceptions silently.
+
+<example title="Enhanced Error Handling">
+
+```kt
+@Component
+class KafkaWalletConsumer(
+    private val objectMapper: ObjectMapper,
+    private val orderService: OrderService,
+) {
+    private val logger = LoggerFactory.getLogger(KafkaWalletConsumer::class.java)
+
+    @KafkaListener(
+        topics = ["wallet.debited"],
+        groupId = "order-service"
+    )
+    fun consume(message: String) {
+        try {
+            val event = objectMapper.readValue(
+                message,
+                WalletDebitedEvent::class.java
+            )
+
+            logger.info("Consuming WalletDebitedEvent: userId={}, orderId={}", 
+                event.userId, event.orderId)
+
+            orderService.markOrderAsPaid(event.userId, event.orderId)
+
+            logger.info("Successfully processed WalletDebitedEvent: orderId={}", 
+                event.orderId)
+
+        } catch (e: JsonProcessingException) {
+            logger.error("Failed to deserialize message: $message", e)
+            throw e // Re-throw to trigger retry/DLQ
+        } catch (e: Exception) {
+            logger.error("Failed to process WalletDebitedEvent: $message", e)
+            throw e // Re-throw to trigger retry/DLQ
+        }
+    }
+}
+```
+</example>
+
+### ObjectMapper Import
+
+- **MUST**: Use `tools.jackson.databind.ObjectMapper` (not `com.fasterxml.jackson`).
+- **MUST**: Verify import statement: `import tools.jackson.databind.ObjectMapper`
+
+---
+
+## Transaction Handling
+
+### Consumer Transactions
+
+- **MUST NOT**: Do NOT add `@Transactional` to `@KafkaListener` methods.
+- **MUST**: Let Service layer methods handle transactions.
+- **MUST**: Service methods called from consumers should use `@Transactional`.
+
+**Rationale**: Kafka listener transactions are managed separately. Service-layer transactions handle database operations.
+
+<example title="Service Transaction in Consumer">
+
+```kt
+@Component
+class KafkaWalletConsumer(
+    private val objectMapper: ObjectMapper,
+    private val orderService: OrderService, // Service handles @Transactional
+) {
+    @KafkaListener(topics = ["wallet.debited"], groupId = "order-service")
+    fun consume(message: String) {
+        val event = objectMapper.readValue(message, WalletDebitedEvent::class.java)
+        // Service method has @Transactional
+        orderService.markOrderAsPaid(event.userId, event.orderId)
+    }
+}
+
+@Service
+class OrderService(
+    private val orderRepository: OrderRepository,
+) {
+    @Transactional // Transaction handled here
+    fun markOrderAsPaid(userId: String, orderId: String) {
+        val order = orderRepository.findById(orderId)
+            ?: throw OrderNotFoundException()
+        order.markAsPaid()
+        orderRepository.save(order)
+    }
+}
+```
+</example>
+
+---
+
+## Testing Kafka Consumers
+
+### Unit Testing
+
+- **MUST**: Test consumer methods by calling them directly (not via Kafka).
+- **MUST**: Mock all service dependencies.
+- **MUST**: Test both success and failure scenarios.
+
+<example title="Consumer Unit Test">
+
+```kt
+class KafkaWalletConsumerTest : BehaviorSpec({
+    val objectMapper = ObjectMapper()
+    val orderService = mockk<OrderService>()
+    val consumer = KafkaWalletConsumer(objectMapper, orderService)
+
+    Given("WalletDebitedEvent consumption") {
+        val userId = "user-123"
+        val orderId = "order-456"
+        val event = WalletDebitedEvent(userId = userId, orderId = orderId)
+        val message = objectMapper.writeValueAsString(event)
+
+        When("valid event message is consumed") {
+            every { orderService.markOrderAsPaid(userId, orderId) } just Runs
+
+            consumer.consume(message)
+
+            Then("orderService.markOrderAsPaid should be called") {
+                verify(exactly = 1) { orderService.markOrderAsPaid(userId, orderId) }
+            }
+        }
+
+        When("invalid JSON message is consumed") {
+            val invalidMessage = "invalid json"
+
+            Then("exception should be thrown") {
+                shouldThrow<Exception> {
+                    consumer.consume(invalidMessage)
+                }
+            }
+        }
+
+        When("message with missing fields is consumed") {
+            val invalidMessage = """{"orderId": "order-456"}"""
+
+            Then("exception should be thrown") {
+                shouldThrow<Exception> {
+                    consumer.consume(invalidMessage)
+                }
+            }
+        }
+    }
+})
+```
+</example>
+
+---
+
+## Best Practices
+
+### Event Design
+
+- **SHOULD**: Include timestamp in events for auditing.
+- **SHOULD**: Include version information for schema evolution.
+- **SHOULD**: Keep events focused and single-purpose.
+- **MUST NOT**: Do not include sensitive data (passwords, tokens) in events.
+
+### Idempotency
+
+- **MUST**: Design consumers to be idempotent (safe to process same event multiple times).
+- **SHOULD**: Use database constraints or state checks to prevent duplicate processing.
+- **SHOULD**: Log duplicate event detection.
+
+### Monitoring and Observability
+
+- **SHOULD**: Log event consumption start and completion.
+- **SHOULD**: Include metrics for event processing time and success/failure rates.
+- **SHOULD**: Set up alerts for consumer lag and failures.
+
+### Message Ordering
+
+- **NOTE**: Kafka guarantees ordering only within a partition.
+- **SHOULD**: Use appropriate message keys to ensure related events are processed in order.
+- **MUST**: Understand that events with different keys may be processed out of order.
+
+---
+
+## Microservices Architecture (MSA)
+
+### Context
+
+- **NOTE**: Kafka is commonly used in MSA for asynchronous event-driven communication.
+- **NOTE**: When using Kafka with gRPC in MSA, refer to `msa.mdc` for detailed patterns.
+- **SHOULD**: Use Kafka for cross-service events, gRPC for synchronous service calls.
+
+---
+
+## Quick Reference Summary
+
+| Aspect | Rule |
+|--------|------|
+| **Package** | `{domain}.kafka` |
+| **Event Classes** | `kafka/event/XEvent.kt` |
+| **Topic Constants** | `kafka/KafkaTopics.kt` or domain-specific objects |
+| **Consumer Classes** | `Kafka{Domain}Consumer.kt` |
+| **Serialization** | `ObjectMapper` (tools.jackson) |
+| **Message Format** | JSON string |
+| **Key Type** | `String` (aggregate ID) |
+| **Consumer Annotation** | `@KafkaListener` (no `@Transactional`) |
+| **Service Transactions** | `@Transactional` on Service methods |
+
+**Key Principles**:
+- ✅ Events are immutable data classes
+- ✅ Topics defined as constants
+- ✅ Consumers delegate to Service layer
+- ✅ Service layer handles transactions
+- ✅ ObjectMapper from `tools.jackson.databind`
+- ✅ Comprehensive error handling and logging
+- ✅ Idempotent consumer design

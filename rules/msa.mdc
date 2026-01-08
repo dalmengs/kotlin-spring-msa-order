@@ -1,0 +1,583 @@
+---
+alwaysApply: true
+---
+
+# Microservices Architecture (MSA) - Outbox Pattern
+
+This rule defines the **Transactional Outbox Pattern** for safe event publishing in microservices architectures using Spring Boot and Kotlin.
+
+---
+
+## AI Behavior Guidelines
+
+When implementing event-driven communication in MSA, you MUST:
+
+1. **Identify the operation type first**: Event Creation, Event Publishing, or Event Consumption
+2. **Follow the Outbox Pattern** for all event publishing
+3. **If the task doesn't fit any defined flow**, do NOT write code. Instead:
+   - Propose an implementation approach following convention principles
+   - Explain your reasoning in detail
+   - Wait for developer confirmation before proceeding
+
+---
+
+## Overview
+
+### Outbox Pattern Principles
+
+- **MUST**: Use Outbox Pattern as the default for safe event publishing/processing.
+- **MUST**: Store events in outbox table within the same transaction as business logic.
+- **MUST**: Use a scheduler to periodically poll and publish pending events to Kafka.
+- **MUST NOT**: Do NOT publish Kafka events directly from Service layer.
+
+### Why Outbox Pattern?
+
+**Problem**: Publishing events directly from service transactions can cause:
+- Lost events if transaction rolls back after Kafka publish
+- Inconsistent state between database and event stream
+- No guarantee of exactly-once delivery
+
+**Solution**: Outbox Pattern ensures:
+- Events are stored atomically with business data
+- Events are published asynchronously by a reliable process
+- Failed publishes can be retried
+- Exactly-once semantics through idempotent consumers
+
+### Pattern Flow
+
+1. **Service Layer**: Business logic + Outbox insert (same transaction)
+2. **Scheduler**: Polls pending events periodically
+3. **Publisher**: Publishes events to Kafka and updates status
+4. **Consumer**: Processes published events (see `kafka.mdc`)
+
+---
+
+## Outbox Entity
+
+### Entity Structure
+
+- **MUST**: Define `{Domain}Outbox` entity for each domain that publishes events.
+- **MUST**: Extend `BaseEntity` (inherits `id`, `seq`, `createdAt`, `updatedAt`).
+- **MUST**: Include required fields: `aggregateId`, `eventType`, `payload`, `status`.
+- **MUST**: Use `@JdbcTypeCode(SqlTypes.JSON)` for JSON payload storage.
+
+<example title="Outbox Entity Definition">
+
+```kt
+package com.dalmeng.convention.wallet.entity
+
+import com.dalmeng.convention.common.entity.BaseEntity
+import jakarta.persistence.Column
+import jakarta.persistence.Entity
+import jakarta.persistence.Table
+import org.hibernate.annotations.JdbcTypeCode
+import org.hibernate.type.SqlTypes
+
+@Entity
+@Table(name = "wallet_outbox")
+class WalletOutbox(
+    @Column(name = "aggregate_id", nullable = false, length = 255)
+    val aggregateId: String,
+
+    @Column(name = "event_type", nullable = false, length = 100)
+    val eventType: String,
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "payload", nullable = false, columnDefinition = "jsonb")
+    val payload: String,
+
+    @Column(name = "status", nullable = false, length = 50)
+    var status: String,
+) : BaseEntity() {
+
+    fun makePublished() {
+        this.status = "PUBLISHED"
+    }
+
+    fun makeFailed() {
+        this.status = "FAILED"
+    }
+
+    companion object {
+        fun create(
+            aggregateId: String,
+            eventType: String,
+            payload: String,
+            status: String = "PENDING"
+        ): WalletOutbox {
+            return WalletOutbox(
+                aggregateId = aggregateId,
+                eventType = eventType,
+                payload = payload,
+                status = status
+            )
+        }
+    }
+}
+```
+</example>
+
+### Status Values
+
+- **PENDING**: Event created but not yet published
+- **PUBLISHED**: Event successfully published to Kafka
+- **FAILED**: Event publishing failed (can be retried)
+
+### Field Descriptions
+
+- **aggregateId**: Identifier of the aggregate root (used as Kafka message key)
+- **eventType**: Type of event (e.g., `"PAYMENT_WALLET_DEBITED"`)
+- **payload**: JSON-serialized event data
+- **status**: Current publishing status
+
+---
+
+## Service Layer Event Creation
+
+### Service Layer Responsibilities
+
+- **MUST**: Do NOT publish Kafka events directly from Service layer.
+- **MUST**: Store events in outbox table within the same transaction as business logic.
+- **MUST**: Use OutboxService to create outbox records.
+- **SHOULD**: Create outbox records only after successful business operations.
+
+<example title="Service Layer with Outbox Pattern">
+
+```kt
+@Service
+class WalletServiceFacade(
+    private val walletQueryRepository: WalletQueryRepository,
+    private val orderService: OrderService,
+    private val walletOutboxService: WalletOutboxService,
+) {
+    @Transactional
+    fun decreaseAmount(userId: String, orderId: String): PaymentResponse {
+        val wallet = walletQueryRepository.findByUserIdForUpdate(userId)
+            ?: throw WalletNotFoundException()
+
+        val order = orderService.findOrder(userId, orderId)
+
+        val beforeBalance = wallet.amount
+        val decreaseResult = wallet.decreaseAmount(order.amount)
+        val afterBalance = wallet.amount
+
+        return when (decreaseResult) {
+            is Wallet.WalletPaymentResult.InsufficientBalance ->
+                PaymentResponse(
+                    orderId = order.orderId,
+                    userId = userId,
+                    aggregateId = order.aggregateId,
+                    requestedAmount = order.amount,
+                    beforeBalance = beforeBalance,
+                    afterBalance = afterBalance,
+                    paymentResult = PaymentResult.INSUFFICIENT_BALANCE
+                )
+
+            is Wallet.WalletPaymentResult.Success -> {
+                // Store event in outbox (same transaction)
+                walletOutboxService.publishPaymentWalletDebitedEvent(
+                    userId = userId,
+                    orderId = orderId,
+                )
+
+                PaymentResponse(
+                    orderId = order.orderId,
+                    userId = userId,
+                    aggregateId = order.aggregateId,
+                    requestedAmount = order.amount,
+                    beforeBalance = beforeBalance,
+                    afterBalance = afterBalance,
+                    paymentResult = PaymentResult.SUCCEED
+                )
+            }
+        }
+    }
+}
+```
+</example>
+
+### OutboxService Pattern
+
+- **MUST**: Create `{Domain}OutboxService` to handle outbox record creation.
+- **MUST**: Serialize event to JSON using `ObjectMapper`.
+- **MUST**: Use entity factory method `create()` for outbox creation.
+
+<example title="OutboxService Implementation">
+
+```kt
+@Service
+class WalletOutboxService(
+    private val walletOutboxRepository: WalletOutboxRepository,
+    private val objectMapper: ObjectMapper,
+) {
+    @Transactional
+    fun publishPaymentWalletDebitedEvent(
+        userId: String,
+        orderId: String,
+    ) {
+        val event = WalletDebitedEvent(
+            userId = userId,
+            orderId = orderId,
+        )
+        val payload = objectMapper.writeValueAsString(event)
+
+        val outbox = WalletOutbox.create(
+            aggregateId = orderId,
+            eventType = "PAYMENT_WALLET_DEBITED",
+            payload = payload,
+            status = "PENDING"
+        )
+
+        walletOutboxRepository.save(outbox)
+    }
+}
+```
+</example>
+
+### gRPC Integration
+
+- **NOTE**: Service layer may call other services via gRPC for synchronous operations.
+- **MUST**: Refer to `grpc.mdc` for gRPC client implementation.
+- **SHOULD**: Use gRPC for operations requiring immediate response.
+- **SHOULD**: Use Outbox + Kafka for asynchronous event notifications.
+
+---
+
+## Outbox Polling Scheduler
+
+### Scheduler Structure
+
+- **MUST**: Name scheduler as `{Domain}OutboxPollingScheduler.kt`.
+- **MUST**: Place in `scheduler/` package.
+- **MUST**: Poll pending events periodically (default: every 1 second).
+- **MUST NOT**: Do NOT add `@Transactional` to scheduler method.
+- **MUST NOT**: Do NOT include Kafka publish logic in scheduler.
+- **MUST**: Delegate publishing to `OutboxEventPublisher`.
+
+<example title="Outbox Polling Scheduler">
+
+```kt
+package com.dalmeng.convention.wallet.scheduler
+
+import com.dalmeng.convention.wallet.entity.WalletOutbox
+import com.dalmeng.convention.wallet.repository.WalletOutboxQueryRepository
+import org.slf4j.LoggerFactory
+import org.springframework.scheduling.annotation.Scheduled
+import org.springframework.stereotype.Component
+
+@Component
+class WalletOutboxPollingScheduler(
+    private val outboxRepository: WalletOutboxQueryRepository,
+    private val eventPublisher: WalletOutboxEventPublisher,
+) {
+    private val logger = LoggerFactory.getLogger(WalletOutboxPollingScheduler::class.java)
+
+    @Scheduled(fixedDelay = 1000) // Poll every 1 second
+    fun publishPendingEvents() {
+        try {
+            logger.debug("Polling pending outbox events")
+            val events = outboxRepository.findAllPendingByLimit(50)
+
+            if (events.isEmpty()) {
+                logger.debug("No pending events found")
+                return
+            }
+
+            logger.info("Found ${events.size} pending events, publishing...")
+
+            for (outbox in events) {
+                try {
+                    eventPublisher.publishEvent(outbox.id)
+                } catch (e: Exception) {
+                    logger.error("Failed to publish event: ${outbox.id}", e)
+                    // Continue with next event
+                }
+            }
+
+            logger.debug("Completed publishing batch")
+        } catch (e: Exception) {
+            logger.error("Outbox polling failed", e)
+        }
+    }
+}
+```
+</example>
+
+### Repository Query
+
+- **MUST**: Implement `findAllPendingByLimit(limit: Int)` in QueryRepository.
+- **MUST**: Filter by `status = "PENDING"`.
+- **MUST**: Order by `seq` ascending (process oldest first).
+- **SHOULD**: Use reasonable batch size (e.g., 50 events per poll).
+
+<example title="QueryRepository Method">
+
+```kt
+@Repository
+class WalletOutboxQueryRepository(
+    private val queryFactory: JPAQueryFactory,
+) {
+    private val walletOutbox = QWalletOutbox.walletOutbox
+
+    fun findAllPendingByLimit(limit: Int): List<WalletOutbox> {
+        return queryFactory
+            .selectFrom(walletOutbox)
+            .where(walletOutbox.status.eq("PENDING"))
+            .orderBy(walletOutbox.seq.asc())
+            .limit(limit.toLong())
+            .fetch()
+    }
+}
+```
+</example>
+
+### Scheduler Configuration
+
+- **SHOULD**: Make polling interval configurable via `application.yml`.
+- **SHOULD**: Adjust batch size based on event volume.
+- **NOTE**: Refer to `scheduler.mdc` for detailed scheduler patterns.
+
+---
+
+## Outbox Event Publisher
+
+### Publisher Structure
+
+- **MUST**: Name publisher as `{Domain}OutboxEventPublisher.kt`.
+- **MUST**: Place in `scheduler/` package.
+- **MUST**: Use `@Component` annotation.
+- **MUST**: Use `@Transactional` on `publishEvent()` method.
+- **MUST**: Use pessimistic lock when fetching outbox record.
+
+<example title="Outbox Event Publisher">
+
+```kt
+package com.dalmeng.convention.wallet.scheduler
+
+import com.dalmeng.convention.kafka.WalletTopics
+import com.dalmeng.convention.wallet.entity.WalletOutbox
+import com.dalmeng.convention.wallet.repository.WalletOutboxQueryRepository
+import org.slf4j.LoggerFactory
+import org.springframework.kafka.core.KafkaTemplate
+import org.springframework.stereotype.Component
+import org.springframework.transaction.annotation.Transactional
+
+@Component
+class WalletOutboxEventPublisher(
+    private val outboxRepository: WalletOutboxQueryRepository,
+    private val kafkaTemplate: KafkaTemplate<String, String>,
+) {
+    private val logger = LoggerFactory.getLogger(WalletOutboxEventPublisher::class.java)
+
+    @Transactional
+    fun publishEvent(outboxId: String) {
+        // Use pessimistic lock to prevent concurrent processing
+        val outbox = outboxRepository.findPendingByIdWithLock(outboxId)
+            ?: run {
+                logger.debug("Outbox not found or already processed: $outboxId")
+                return
+            }
+
+        try {
+            val topic = when (outbox.eventType) {
+                "PAYMENT_WALLET_DEBITED" -> WalletTopics.PAYMENT_WALLET_DEBITED
+                else -> {
+                    logger.warn("Unknown eventType: ${outbox.eventType}, skipping")
+                    return
+                }
+            }
+
+            // Publish to Kafka
+            kafkaTemplate.send(
+                topic = topic,
+                key = outbox.aggregateId,
+                data = outbox.payload
+            )
+
+            // Update status to PUBLISHED
+            outbox.makePublished()
+
+            logger.info("Successfully published event: ${outbox.id}, type: ${outbox.eventType}")
+        } catch (e: Exception) {
+            logger.error("Failed to publish event: ${outbox.id}", e)
+            outbox.makeFailed()
+            throw e // Re-throw to trigger transaction rollback
+        }
+    }
+}
+```
+</example>
+
+### Pessimistic Locking
+
+- **MUST**: Use `PESSIMISTIC_WRITE` lock when fetching outbox record.
+- **WHY**: Prevents concurrent processing of the same event by multiple scheduler instances.
+- **MUST**: Lock only when status is `"PENDING"`.
+
+<example title="Locked Query Method">
+
+```kt
+@Repository
+class WalletOutboxQueryRepository(
+    private val queryFactory: JPAQueryFactory,
+) {
+    private val walletOutbox = QWalletOutbox.walletOutbox
+
+    fun findPendingByIdWithLock(id: String): WalletOutbox? {
+        return queryFactory
+            .selectFrom(walletOutbox)
+            .where(
+                walletOutbox.id.eq(id),
+                walletOutbox.status.eq("PENDING")
+            )
+            .setLockMode(LockModeType.PESSIMISTIC_WRITE)
+            .fetchOne()
+    }
+}
+```
+</example>
+
+### Transaction Boundaries
+
+- **MUST**: Use `@Transactional` on publisher method.
+- **WHY**: Ensures atomicity: Kafka publish + status update happen together.
+- **NOTE**: If Kafka publish succeeds but status update fails, transaction rolls back and event can be retried.
+
+### Error Handling
+
+- **MUST**: Catch exceptions and mark event as `FAILED`.
+- **SHOULD**: Log errors with full context.
+- **SHOULD**: Re-throw exception to trigger transaction rollback (allows retry).
+
+---
+
+## Event Consumption
+
+### Consumer Implementation
+
+- **MUST**: Implement Kafka consumers following `kafka.mdc` rules.
+- **MUST**: Design consumers to be idempotent (safe to process same event multiple times).
+- **SHOULD**: Handle duplicate events gracefully.
+
+<example title="Event Flow Summary">
+
+```
+1. Service Layer: Business logic + Outbox insert (atomic)
+   ↓
+2. Scheduler: Polls pending events every 1 second
+   ↓
+3. Publisher: Locks event, publishes to Kafka, updates status
+   ↓
+4. Consumer: Processes event and updates domain state
+```
+</example>
+
+---
+
+## gRPC vs Kafka: When to Use What
+
+### Decision Criteria
+
+Use **gRPC** when:
+- **MUST**: Immediate response is required in the same request/response cycle
+- **MUST**: Operation result affects current transaction outcome
+- **SHOULD**: Synchronous communication is necessary
+
+Use **Kafka** (Outbox Pattern) when:
+- **MUST**: Asynchronous notification is sufficient
+- **MUST**: Event affects other services but not current transaction
+- **SHOULD**: Decoupling between services is desired
+- **SHOULD**: Event sourcing or eventual consistency is acceptable
+
+### Real-World Example: Payment Flow
+
+**Scenario**: Order service receives payment request.
+
+**Flow**:
+1. Order service receives payment request
+2. Order service calls Wallet service via **gRPC** to decrease balance
+   - **Why gRPC?**: Need immediate response (success/failure) to return to client
+3. Wallet service decreases balance and stores `PAYMENT_WALLET_DEBITED` event in outbox
+4. Scheduler publishes event to Kafka
+5. Order service consumes `PAYMENT_WALLET_DEBITED` event via **Kafka**
+   - **Why Kafka?**: Order status update (`CREATED` → `PAID`) doesn't need to be synchronous
+   - Wallet service's responsibility is balance decrease, not order status management
+   - Event-driven approach decouples services
+
+**Key Points**:
+- gRPC: Synchronous, immediate response required
+- Kafka: Asynchronous, eventual consistency acceptable
+- Outbox: Ensures safe event publishing
+
+### Comparison Table
+
+| Aspect | gRPC | Kafka (Outbox) |
+|--------|------|----------------|
+| **Communication** | Synchronous | Asynchronous |
+| **Response Time** | Immediate | Eventual |
+| **Use Case** | Request-response | Event notification |
+| **Coupling** | Tight (direct dependency) | Loose (event-driven) |
+| **Failure Handling** | Immediate error | Retry via outbox |
+| **Transaction Scope** | Same transaction | Separate transactions |
+
+---
+
+## Best Practices
+
+### Outbox Design
+
+- **SHOULD**: Keep outbox table separate from domain tables.
+- **SHOULD**: Archive or delete published events periodically.
+- **SHOULD**: Monitor outbox table size and processing lag.
+- **SHOULD**: Set up alerts for stuck events (PENDING for too long).
+
+### Event Design
+
+- **MUST**: Include all necessary context in event payload.
+- **SHOULD**: Use versioned event schemas for evolution.
+- **SHOULD**: Include timestamps for event ordering.
+- **MUST NOT**: Do not include sensitive data in events.
+
+### Performance
+
+- **SHOULD**: Tune polling interval based on event volume.
+- **SHOULD**: Adjust batch size for optimal throughput.
+- **SHOULD**: Monitor Kafka publish latency.
+- **SHOULD**: Consider connection pooling for high-throughput scenarios.
+
+### Monitoring
+
+- **SHOULD**: Track outbox table metrics:
+  - PENDING event count
+  - Average time to publish
+  - Failed event count
+- **SHOULD**: Monitor scheduler execution time.
+- **SHOULD**: Alert on processing lag or failures.
+
+---
+
+## Quick Reference Summary
+
+| Component | Location | Responsibility |
+|-----------|----------|---------------|
+| **Outbox Entity** | `{domain}/entity/{Domain}Outbox.kt` | Event storage |
+| **OutboxService** | `{domain}/service/{Domain}OutboxService.kt` | Create outbox records |
+| **Polling Scheduler** | `scheduler/{Domain}OutboxPollingScheduler.kt` | Poll pending events |
+| **Event Publisher** | `scheduler/{Domain}OutboxEventPublisher.kt` | Publish to Kafka |
+| **Kafka Consumer** | `kafka/Kafka{Domain}Consumer.kt` | Process events |
+
+**Key Principles**:
+- ✅ Service layer stores events in outbox (same transaction)
+- ✅ Scheduler polls and delegates to publisher
+- ✅ Publisher uses pessimistic lock for concurrency
+- ✅ Publisher updates status atomically with Kafka publish
+- ✅ Consumers are idempotent
+- ✅ Use gRPC for synchronous, Kafka for asynchronous
+- ✅ Outbox ensures exactly-once semantics
+
+**Status Flow**:
+```
+PENDING → PUBLISHED (success)
+PENDING → FAILED (error, can retry)
+``` 
+

@@ -1,0 +1,563 @@
+---
+alwaysApply: true
+---
+
+# gRPC Patterns (Spring Boot + Kotlin)
+
+This rule defines gRPC client and server patterns for Spring Boot applications using Kotlin with coroutines.
+
+---
+
+## AI Behavior Guidelines
+
+When implementing gRPC communication, you MUST:
+
+1. **Identify the operation type first**: gRPC Client or gRPC Server
+2. **Follow the corresponding convention** for that operation type
+3. **If the task doesn't fit any defined flow**, do NOT write code. Instead:
+   - Propose an implementation approach following convention principles
+   - Explain your reasoning in detail
+   - Wait for developer confirmation before proceeding
+
+---
+
+## Configuration
+
+### Application Configuration
+
+- **MUST**: Configure gRPC settings in `application.yml`.
+- **MUST**: Define server port for gRPC server.
+- **MUST**: Define client configurations for each external gRPC service.
+- **MUST**: Client names in `application.yml` must match `@GrpcClient` annotation values.
+- **SHOULD**: Use intuitive domain names for client identifiers (e.g., `wallet`, `order`, `payment`).
+
+<example title="gRPC Configuration in application.yml">
+
+```yaml
+grpc:
+  server:
+    port: 9091
+  client:
+    wallet:
+      address: "static://localhost:9090"
+      negotiationType: plaintext
+    order:
+      address: "static://localhost:9092"
+      negotiationType: plaintext
+```
+</example>
+
+### Dependencies
+
+- **MUST**: Include gRPC dependencies in `build.gradle.kts`:
+  - `grpc-netty-shaded`
+  - `grpc-kotlin-stub`
+  - `grpc-protobuf`
+  - `grpc-client-spring-boot-starter`
+  - `grpc-server-spring-boot-starter`
+  - `kotlinx-coroutines-core`
+  - `protobuf-kotlin`
+
+- **MUST**: Configure protobuf plugin for code generation.
+
+---
+
+## Project Structure
+
+### Package Layout
+
+- **MUST**: Place gRPC-related code under `grpc/client/{domain}/` and `grpc/server/{domain}/`.
+- **MUST**: Organize files as follows:
+
+```
+{domain}/grpc/
+├── client/
+│   ├── {domain}/
+│   │   ├── {Domain}GrpcClient.kt
+│   │   └── {Domain}Service.kt
+└── server/
+    └── {domain}/
+        └── {Domain}GrpcServer.kt
+```
+
+### Proto File Location
+
+- **MUST**: Place proto files in `src/main/proto/`.
+- **MUST**: Name proto files as `{domain}.proto` (e.g., `wallet.proto`, `order.proto`).
+
+---
+
+## Protocol Buffer Definitions
+
+### Proto File Structure
+
+- **MUST**: Use `proto3` syntax.
+- **MUST**: Define package, Java options for code generation.
+- **MUST**: Define service with RPC methods.
+- **MUST**: Define request and response messages.
+- **SHOULD**: Include `success: bool` and `message: string` fields in responses.
+- **SHOULD**: Define enums for status/result types.
+
+<example title="Complete Proto File">
+
+```protobuf
+syntax = "proto3";
+
+package wallet;
+
+option java_multiple_files = true;
+option java_package = "com.example.wallet.grpc";
+option java_outer_classname = "WalletProto";
+
+service WalletService {
+  rpc DecreaseWallet (DecreaseWalletRequest)
+      returns (DecreaseWalletResponse);
+}
+
+message DecreaseWalletRequest {
+  string orderId = 1;
+  string userId  = 2;
+  int64 amount   = 3;
+}
+
+enum PaymentResult {
+  PAYMENT_RESULT_UNSPECIFIED = 0;
+  SUCCEED = 1;
+  INSUFFICIENT_BALANCE = 2;
+  INVALID_PAYMENT = 3;
+  FAILED = 4;
+}
+
+message DecreaseWalletResponse {
+  string orderId = 1;
+  string userId  = 2;
+  int64 requestedAmount = 3;
+  PaymentResult paymentResult = 4;
+  int64 beforeBalance = 5;
+  int64 afterBalance  = 6;
+  bool success = 7;
+  string message = 8;
+}
+```
+</example>
+
+### Proto Naming Conventions
+
+- **MUST**: Use PascalCase for service, message, and enum names.
+- **MUST**: Use UPPER_SNAKE_CASE for enum values.
+- **MUST**: Use camelCase for field names.
+- **SHOULD**: Include `_UNSPECIFIED = 0` as the first enum value (proto3 requirement).
+
+### Response Message Requirements
+
+- **MUST**: Include `success: bool` field in all response messages.
+- **MUST**: Include `message: string` field in all response messages.
+- **SHOULD**: Include domain-specific fields as needed.
+
+---
+
+## gRPC Client Implementation
+
+### Client Class Structure
+
+- **MUST**: Name client classes as `{Domain}GrpcClient.kt`.
+- **MUST**: Place clients in `grpc/client/{domain}/` package.
+- **MUST**: Annotate class with `@Component`.
+- **MUST**: Use `@GrpcClient` annotation with client name matching `application.yml`.
+- **MUST**: Use `lateinit var stub` for stub injection.
+- **MUST**: Stub type follows pattern: `{ServiceName}GrpcKt.{ServiceName}CoroutineStub`.
+
+<example title="Standard gRPC Client">
+
+```kt
+package com.dalmeng.convention.grpc.client.wallet
+
+import com.example.wallet.grpc.DecreaseWalletRequest
+import com.example.wallet.grpc.DecreaseWalletResponse
+import com.example.wallet.grpc.WalletServiceGrpcKt
+import net.devh.boot.grpc.client.inject.GrpcClient
+import org.springframework.stereotype.Component
+
+@Component
+class WalletGrpcClient {
+
+    @GrpcClient("wallet")
+    lateinit var stub: WalletServiceGrpcKt.WalletServiceCoroutineStub
+
+    suspend fun decrease(
+        orderId: String,
+        userId: String,
+        amount: Long
+    ): DecreaseWalletResponse {
+        val request = DecreaseWalletRequest.newBuilder()
+            .setOrderId(orderId)
+            .setUserId(userId)
+            .setAmount(amount)
+            .build()
+
+        return stub.decreaseWallet(request)
+    }
+}
+```
+</example>
+
+### Client Method Requirements
+
+- **MUST**: All client methods must be `suspend` functions.
+- **MUST**: Use builder pattern for request construction: `XRequest.newBuilder().setY().build()`.
+- **MUST**: Call stub methods with request objects.
+- **MUST**: Return response objects directly.
+
+### Client Name Matching
+
+- **MUST**: The value in `@GrpcClient("wallet")` must match the key in `application.yml`:
+  ```yaml
+  grpc:
+    client:
+      wallet:  # ← Must match @GrpcClient("wallet")
+        address: "static://localhost:9090"
+  ```
+
+---
+
+## gRPC Service Layer (Client Abstraction)
+
+### Service Layer Pattern
+
+- **MUST**: Do NOT use gRPC clients directly in business logic.
+- **MUST**: Create a service layer that wraps the gRPC client.
+- **MUST**: Name service classes as `{Domain}Service.kt` in `grpc/client/{domain}/`.
+- **MUST**: Use `runBlocking` to call suspend functions from non-suspend contexts.
+
+<example title="gRPC Service Layer">
+
+```kt
+package com.dalmeng.convention.grpc.client.wallet
+
+import com.example.wallet.grpc.DecreaseWalletResponse
+import kotlinx.coroutines.runBlocking
+import org.springframework.stereotype.Component
+
+@Component
+class WalletService(
+    private val walletGrpcClient: WalletGrpcClient
+) {
+    fun decreaseBalance(
+        userId: String,
+        orderId: String,
+        amount: Long
+    ): DecreaseWalletResponse = runBlocking {
+        walletGrpcClient.decrease(
+            orderId = orderId,
+            userId = userId,
+            amount = amount
+        )
+    }
+}
+```
+</example>
+
+### Service Layer Benefits
+
+- **Abstraction**: Business logic doesn't depend on gRPC implementation details.
+- **Testability**: Easier to mock service layer than gRPC client.
+- **Flexibility**: Can switch implementations without changing business logic.
+
+---
+
+## gRPC Server Implementation
+
+### Server Class Structure
+
+- **MUST**: Name server classes as `{Domain}GrpcServer.kt`.
+- **MUST**: Place servers in `grpc/server/{domain}/` package.
+- **MUST**: Annotate class with `@GrpcService`.
+- **MUST**: Extend generated base class: `{ServiceName}GrpcKt.{ServiceName}CoroutineImplBase()`.
+- **MUST**: Override service methods defined in proto file.
+- **MUST**: All server methods must be `suspend` functions.
+
+<example title="Standard gRPC Server">
+
+```kt
+package com.dalmeng.convention.grpc.server.order
+
+import com.dalmeng.convention.order.dto.response.OrderResponse
+import com.dalmeng.convention.order.service.OrderService
+import com.example.order.grpc.FindOrderRequest
+import com.example.order.grpc.FindOrderResponse
+import com.example.order.grpc.OrderServiceGrpcKt
+import net.devh.boot.grpc.server.service.GrpcService
+
+@GrpcService
+class OrderGrpcServer(
+    private val orderService: OrderService
+) : OrderServiceGrpcKt.OrderServiceCoroutineImplBase() {
+
+    override suspend fun findOrder(
+        request: FindOrderRequest
+    ): FindOrderResponse {
+        val orderResponse = orderService.findOrderByOrderId(
+            userId = request.userId,
+            orderId = request.orderId
+        )
+
+        return FindOrderResponse.newBuilder()
+            .setOrderId(orderResponse.orderId)
+            .setAggregateId(orderResponse.aggregateId)
+            .setUserId(request.userId)
+            .setAmount(orderResponse.amount)
+            .setStatus(OrderResponse.convertToGrpcStatus(orderResponse.status))
+            .setExists(true)
+            .setSuccess(true)
+            .setMessage("SUCCEED")
+            .build()
+    }
+}
+```
+</example>
+
+### Server Method Requirements
+
+- **MUST**: Method names must match proto RPC definitions exactly.
+- **MUST**: Use builder pattern for response construction: `XResponse.newBuilder().setY().build()`.
+- **MUST**: Inject domain services via constructor (not repositories directly).
+- **SHOULD**: Map domain DTOs to gRPC response objects.
+- **MUST**: Set `success` and `message` fields in all responses.
+
+### Error Handling
+
+- **SHOULD**: Catch domain exceptions and convert to appropriate gRPC status codes.
+- **SHOULD**: Set `success = false` and descriptive `message` on errors.
+- **MUST NOT**: Never throw unhandled exceptions (use gRPC status codes).
+
+<example title="Error Handling in Server">
+
+```kt
+@GrpcService
+class OrderGrpcServer(
+    private val orderService: OrderService
+) : OrderServiceGrpcKt.OrderServiceCoroutineImplBase() {
+
+    override suspend fun findOrder(
+        request: FindOrderRequest
+    ): FindOrderResponse {
+        return try {
+            val orderResponse = orderService.findOrderByOrderId(
+                userId = request.userId,
+                orderId = request.orderId
+            )
+
+            FindOrderResponse.newBuilder()
+                .setOrderId(orderResponse.orderId)
+                .setUserId(request.userId)
+                .setAmount(orderResponse.amount)
+                .setExists(true)
+                .setSuccess(true)
+                .setMessage("SUCCEED")
+                .build()
+        } catch (e: OrderNotFoundException) {
+            FindOrderResponse.newBuilder()
+                .setOrderId(request.orderId)
+                .setUserId(request.userId)
+                .setExists(false)
+                .setSuccess(false)
+                .setMessage("Order not found: ${request.orderId}")
+                .build()
+        } catch (e: Exception) {
+            FindOrderResponse.newBuilder()
+                .setOrderId(request.orderId)
+                .setUserId(request.userId)
+                .setExists(false)
+                .setSuccess(false)
+                .setMessage("Internal error: ${e.message}")
+                .build()
+        }
+    }
+}
+```
+</example>
+
+---
+
+## Testing gRPC Components
+
+### Testing gRPC Clients
+
+- **MUST**: Mock the stub using `lateinit` injection pattern.
+- **MUST**: Use `coEvery` for stubbing suspend functions.
+- **MUST**: Use `runBlocking` to call suspend functions in tests.
+
+<example title="gRPC Client Test">
+
+```kt
+class WalletGrpcClientTest : BehaviorSpec({
+    val stub = mockk<WalletServiceGrpcKt.WalletServiceCoroutineStub>()
+    val client = WalletGrpcClient().apply {
+        this.stub = stub
+    }
+
+    Given("Decrease Wallet Request") {
+        val orderId = "order-123"
+        val userId = "user-456"
+        val amount = 1000L
+
+        When("decrease succeeds") {
+            val response = DecreaseWalletResponse.newBuilder()
+                .setOrderId(orderId)
+                .setUserId(userId)
+                .setRequestedAmount(amount)
+                .setPaymentResult(PaymentResult.SUCCEED)
+                .setSuccess(true)
+                .setMessage("Payment succeeded")
+                .build()
+
+            coEvery {
+                stub.decreaseWallet(
+                    any<DecreaseWalletRequest>(),
+                    any()
+                )
+            } returns response
+
+            val result = runBlocking {
+                client.decrease(orderId, userId, amount)
+            }
+
+            Then("response should match expected values") {
+                result.orderId shouldBe orderId
+                result.success shouldBe true
+                result.paymentResult shouldBe PaymentResult.SUCCEED
+            }
+        }
+    }
+})
+```
+</example>
+
+**Note**: gRPC coroutine stub methods accept an additional `metadata` (or `callOptions`) parameter. When stubbing with `coEvery`, you MUST match **both arguments** using `any()`.
+
+### Testing gRPC Servers
+
+- **MUST**: Mock domain services injected into server.
+- **MUST**: Test both success and error scenarios.
+
+<example title="gRPC Server Test">
+
+```kt
+class OrderGrpcServerTest : BehaviorSpec({
+    val orderService = mockk<OrderService>()
+    val server = OrderGrpcServer(orderService)
+
+    Given("FindOrder request") {
+        val request = FindOrderRequest.newBuilder()
+            .setOrderId("order-123")
+            .setUserId("user-456")
+            .build()
+
+        When("order exists") {
+            val orderResponse = OrderResponse(
+                orderId = "order-123",
+                userId = "user-456",
+                amount = 1000L,
+                status = OrderStatus.CREATED
+            )
+
+            every {
+                orderService.findOrderByOrderId("user-456", "order-123")
+            } returns orderResponse
+
+            val result = runBlocking {
+                server.findOrder(request)
+            }
+
+            Then("response should contain order data") {
+                result.orderId shouldBe "order-123"
+                result.exists shouldBe true
+                result.success shouldBe true
+            }
+        }
+    }
+})
+```
+</example>
+
+---
+
+## Best Practices
+
+### Proto Design
+
+- **SHOULD**: Keep proto files focused and domain-specific.
+- **SHOULD**: Use enums for status/result types instead of strings.
+- **SHOULD**: Include version information for schema evolution.
+- **MUST NOT**: Do not include sensitive data in proto messages.
+
+### Client Design
+
+- **SHOULD**: Create wrapper service layer for better testability.
+- **SHOULD**: Handle gRPC exceptions and convert to domain exceptions.
+- **SHOULD**: Use meaningful parameter names in client methods.
+
+### Server Design
+
+- **SHOULD**: Delegate business logic to domain services, not repositories.
+- **SHOULD**: Map domain models to gRPC responses explicitly.
+- **SHOULD**: Provide clear error messages in response `message` field.
+
+### Performance
+
+- **NOTE**: gRPC uses HTTP/2 and is efficient for inter-service communication.
+- **SHOULD**: Consider connection pooling for high-throughput scenarios.
+- **SHOULD**: Monitor gRPC call latency and error rates.
+
+---
+
+## Microservices Architecture (MSA)
+
+### Context
+
+- **NOTE**: gRPC is commonly used in MSA for synchronous inter-service communication.
+- **NOTE**: When using Kafka with gRPC in MSA:
+  - Use **Kafka** for asynchronous event-driven communication
+  - Use **gRPC** for synchronous request-response calls
+- **SHOULD**: Refer to `msa.mdc` for detailed MSA patterns when available.
+
+### When to Use gRPC vs Kafka
+
+| Use Case | Technology |
+|----------|-----------|
+| Synchronous request-response | gRPC |
+| Asynchronous events | Kafka |
+| Real-time queries | gRPC |
+| Event sourcing | Kafka |
+| Service-to-service calls | gRPC |
+| Cross-service notifications | Kafka |
+
+---
+
+## Quick Reference Summary
+
+| Aspect | Rule |
+|--------|------|
+| **Proto Location** | `src/main/proto/{domain}.proto` |
+| **Client Package** | `grpc/client/{domain}/` |
+| **Client Class** | `{Domain}GrpcClient.kt` |
+| **Client Annotation** | `@Component` + `@GrpcClient("name")` |
+| **Stub Type** | `{Service}GrpcKt.{Service}CoroutineStub` |
+| **Client Methods** | `suspend fun` |
+| **Service Layer** | `grpc/client/{domain}/{Domain}Service.kt` |
+| **Service Methods** | Use `runBlocking` for suspend calls |
+| **Server Package** | `grpc/server/{domain}/` |
+| **Server Class** | `{Domain}GrpcServer.kt` |
+| **Server Annotation** | `@GrpcService` |
+| **Server Base Class** | `{Service}GrpcKt.{Service}CoroutineImplBase()` |
+| **Server Methods** | `override suspend fun` |
+| **Response Fields** | Must include `success: bool` and `message: string` |
+
+**Key Principles**:
+- ✅ Proto files define the contract
+- ✅ Clients use suspend functions with builder pattern
+- ✅ Service layer abstracts gRPC clients
+- ✅ Servers extend generated base classes
+- ✅ All methods use coroutines (suspend)
+- ✅ Response messages include success and message fields
+- ✅ Error handling converts exceptions to response fields

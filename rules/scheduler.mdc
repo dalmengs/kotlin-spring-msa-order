@@ -1,0 +1,376 @@
+---
+globs: **/*Scheduler.kt,**/*Cron*.kt
+alwaysApply: false
+---
+
+# Scheduler / Cron Patterns (Spring Boot + Kotlin)
+
+This rule defines scheduling and cron job patterns for Spring Boot applications using Kotlin.
+
+Applied to: `**/*Scheduler.kt`, `**/*Cron*.kt`.
+
+---
+
+## AI Behavior Guidelines
+
+When implementing scheduled jobs, you MUST:
+
+1. **Identify the scheduling type first**: Cron-based or fixed delay/rate
+2. **Follow the corresponding convention** for that scheduling type
+3. **If the task doesn't fit any defined flow**, do NOT write code. Instead:
+   - Propose an implementation approach following convention principles
+   - Explain your reasoning in detail
+   - Wait for developer confirmation before proceeding
+
+---
+
+## Core Principles
+
+### File Location and Naming
+- **MUST**: Place scheduler classes under `{domain}.scheduler` package.
+- **MUST**: Name scheduler classes as `{Domain}Scheduler.kt` (e.g., `OrderScheduler.kt`, `NotificationScheduler.kt`).
+- **MUST NOT**: Do not place scheduler logic in Controller or Service classes.
+
+### Separation of Concerns
+- **MUST**: Schedulers are separate orchestration classes that coordinate service calls.
+- **MUST**: Services provide "work methods" that contain business logic.
+- **MUST**: Schedulers orchestrate the execution flow, not implement business logic.
+
+### Idempotency
+- **MUST**: All scheduled jobs MUST be idempotent (safe to run multiple times).
+- **MUST**: Design jobs to handle partial failures and retries gracefully.
+- **SHOULD**: Use database flags, timestamps, or state checks to prevent duplicate processing.
+
+### Exception Handling
+- **MUST**: Wrap all scheduled job logic in `try/catch` blocks.
+- **MUST**: Log all exceptions with appropriate context.
+- **MUST NOT**: Never let exceptions kill the scheduler thread or prevent future executions.
+
+---
+
+## Spring Scheduling Configuration
+
+### Enable Scheduling
+- **MUST**: Activate scheduling by adding `@EnableScheduling` to the main `Application.kt` class.
+
+```kt
+@SpringBootApplication
+@EnableScheduling
+class ConventionApplication
+
+fun main(args: Array<String>) {
+    runApplication<ConventionApplication>(*args)
+}
+```
+
+### Scheduling Annotations
+- **Use**: `@Scheduled(cron = "...")` for cron-based scheduling
+- **Use**: `@Scheduled(fixedDelayString = "...")` for fixed delay (milliseconds after completion)
+- **Use**: `@Scheduled(fixedRateString = "...")` for fixed rate (milliseconds between starts)
+
+**Preference**: Prefer cron expressions for time-based scheduling (hourly, daily, etc.).
+
+---
+
+## Scheduler Class Structure
+
+### Required Components
+- **MUST**: Annotate scheduler class with `@Component`
+- **MUST**: Inject required services via constructor
+- **MUST**: Create a logger instance using `LoggerFactory.getLogger()`
+- **MUST**: Each scheduled method must be `@Scheduled` and wrapped in try/catch
+
+<example title="Standard Scheduler Template">
+
+```kt
+@Component
+class OrderScheduler(
+    private val orderService: OrderService,
+    private val notificationService: NotificationService,
+) {
+    private val logger = LoggerFactory.getLogger(OrderScheduler::class.java)
+
+    @Scheduled(cron = "0 */10 * * * *") // Every 10 minutes
+    fun processPendingOrders() {
+        try {
+            logger.info("Starting scheduled job: processPendingOrders")
+            orderService.processPendingOrders()
+            logger.info("Completed scheduled job: processPendingOrders")
+        } catch (e: Exception) {
+            logger.error("Scheduled job failed: processPendingOrders", e)
+        }
+    }
+
+    @Scheduled(cron = "0 0 1 * * *") // Daily at 1 AM
+    fun sendDailyReports() {
+        try {
+            logger.info("Starting scheduled job: sendDailyReports")
+            notificationService.sendDailyReports()
+            logger.info("Completed scheduled job: sendDailyReports")
+        } catch (e: Exception) {
+            logger.error("Scheduled job failed: sendDailyReports", e)
+        }
+    }
+}
+```
+</example>
+
+### Method Naming
+- **MUST**: Use descriptive method names that clearly indicate the job's purpose.
+- **SHOULD**: Follow verb-noun pattern: `processX`, `sendX`, `cleanupX`, `validateX`.
+- **MUST NOT**: Avoid generic names like `run()`, `execute()`, `doWork()`.
+
+---
+
+## Cron Expression Guidelines
+
+### Common Patterns
+- **Every minute**: `"0 * * * * *"`
+- **Every 10 minutes**: `"0 */10 * * * *"`
+- **Every hour**: `"0 0 * * * *"`
+- **Daily at 1 AM**: `"0 0 1 * * *"`
+- **Daily at midnight**: `"0 0 0 * * *"`
+- **Weekly (Monday at 2 AM)**: `"0 0 2 * * MON"`
+- **Monthly (1st day at 3 AM)**: `"0 0 3 1 * *"`
+
+### Cron Format
+```
+┌───────────── second (0-59)
+│ ┌─────────── minute (0-59)
+│ │ ┌───────── hour (0-23)
+│ │ │ ┌─────── day of month (1-31)
+│ │ │ │ ┌───── month (1-12)
+│ │ │ │ │ ┌─── day of week (0-7, 0 or 7 is Sunday)
+│ │ │ │ │ │
+* * * * * *
+```
+
+### Best Practices
+- **MUST**: Store cron expressions in `application.yml` for environment-specific configuration.
+- **SHOULD**: Use property placeholders: `@Scheduled(cron = "\${scheduler.order.process.cron}")`
+
+<example title="Externalized Cron Configuration">
+
+```yaml
+# application.yml
+scheduler:
+  order:
+    process:
+      cron: "0 */10 * * * *"
+  notification:
+    daily:
+      cron: "0 0 1 * * *"
+```
+
+```kt
+@Component
+class OrderScheduler(
+    private val orderService: OrderService,
+) {
+    private val logger = LoggerFactory.getLogger(OrderScheduler::class.java)
+
+    @Scheduled(cron = "\${scheduler.order.process.cron}")
+    fun processPendingOrders() {
+        try {
+            logger.info("Starting scheduled job: processPendingOrders")
+            orderService.processPendingOrders()
+            logger.info("Completed scheduled job: processPendingOrders")
+        } catch (e: Exception) {
+            logger.error("Scheduled job failed: processPendingOrders", e)
+        }
+    }
+}
+```
+</example>
+
+---
+
+## Service Layer Integration
+
+### Service Method Design
+- **MUST**: Service methods called by schedulers should be idempotent.
+- **MUST**: Services should handle their own transaction boundaries.
+- **SHOULD**: Services should accept optional parameters for batch size, time windows, etc.
+
+<example title="Service Method for Scheduler">
+
+```kt
+@Service
+class OrderService(
+    private val orderRepository: OrderRepository,
+) {
+    @Transactional
+    fun processPendingOrders(batchSize: Int = 100) {
+        val pendingOrders = orderRepository.findPendingOrders(limit = batchSize)
+        
+        pendingOrders.forEach { order ->
+            try {
+                processOrder(order)
+            } catch (e: Exception) {
+                logger.error("Failed to process order: ${order.id}", e)
+                // Continue processing other orders
+            }
+        }
+    }
+
+    private fun processOrder(order: Order) {
+        // Business logic here
+        order.markAsProcessing()
+        orderRepository.save(order)
+    }
+}
+```
+</example>
+
+---
+
+## Multi-Instance / Distributed Execution
+
+### Single Instance
+- The standard pattern with `@Scheduled` is sufficient for single-instance deployments.
+- No additional coordination is needed.
+
+### Multi-Instance (Multiple Servers)
+- **NOTE**: In multi-instance environments, scheduled jobs may run simultaneously on multiple servers.
+- **MUST**: If duplicate execution is problematic, implement distributed locking.
+- **SHOULD**: Consider using ShedLock, Redis locks, or database-based locks.
+
+<example title="ShedLock Integration (Optional)">
+
+```kt
+@Component
+class OrderScheduler(
+    private val orderService: OrderService,
+) {
+    private val logger = LoggerFactory.getLogger(OrderScheduler::class.java)
+
+    @Scheduled(cron = "0 */10 * * * *")
+    @SchedulerLock(
+        name = "processPendingOrders",
+        lockAtMostFor = "9m",
+        lockAtLeastFor = "1m"
+    )
+    fun processPendingOrders() {
+        try {
+            logger.info("Starting scheduled job: processPendingOrders")
+            orderService.processPendingOrders()
+            logger.info("Completed scheduled job: processPendingOrders")
+        } catch (e: Exception) {
+            logger.error("Scheduled job failed: processPendingOrders", e)
+        }
+    }
+}
+```
+</example>
+
+**Note**: ShedLock requires additional setup (database table, dependency, configuration). Only use if multi-instance coordination is required.
+
+---
+
+## Error Handling and Logging
+
+### Logging Requirements
+- **MUST**: Log job start with `logger.info()`.
+- **MUST**: Log job completion with `logger.info()`.
+- **MUST**: Log all exceptions with `logger.error()` including full stack trace.
+- **SHOULD**: Include job name, execution time, and result metrics in logs.
+
+<example title="Enhanced Logging">
+
+```kt
+@Component
+class OrderScheduler(
+    private val orderService: OrderService,
+) {
+    private val logger = LoggerFactory.getLogger(OrderScheduler::class.java)
+
+    @Scheduled(cron = "0 */10 * * * *")
+    fun processPendingOrders() {
+        val startTime = System.currentTimeMillis()
+        try {
+            logger.info("Starting scheduled job: processPendingOrders")
+            val processedCount = orderService.processPendingOrders()
+            val duration = System.currentTimeMillis() - startTime
+            logger.info(
+                "Completed scheduled job: processPendingOrders. " +
+                "Processed: $processedCount, Duration: ${duration}ms"
+            )
+        } catch (e: Exception) {
+            val duration = System.currentTimeMillis() - startTime
+            logger.error(
+                "Scheduled job failed: processPendingOrders. " +
+                "Duration: ${duration}ms",
+                e
+            )
+        }
+    }
+}
+```
+</example>
+
+### Exception Strategy
+- **MUST**: Catch all exceptions to prevent scheduler thread death.
+- **SHOULD**: Consider alerting/monitoring integration for critical failures.
+- **MUST NOT**: Never swallow exceptions silently (always log).
+
+---
+
+## Testing Scheduled Jobs
+
+### Unit Testing
+- **MUST**: Test scheduler methods by calling them directly (not waiting for actual scheduling).
+- **MUST**: Mock all service dependencies.
+- **SHOULD**: Verify service methods are called with correct parameters.
+
+<example title="Scheduler Unit Test">
+
+```kt
+class OrderSchedulerTest : BehaviorSpec({
+    val orderService = mockk<OrderService>()
+    val scheduler = OrderScheduler(orderService)
+
+    Given("a scheduled job") {
+        When("processPendingOrders is executed") {
+            every { orderService.processPendingOrders() } just Runs
+
+            scheduler.processPendingOrders()
+
+            Then("orderService.processPendingOrders should be called") {
+                verify(exactly = 1) { orderService.processPendingOrders() }
+            }
+        }
+
+        When("processPendingOrders throws an exception") {
+            every { orderService.processPendingOrders() } throws RuntimeException("Test error")
+
+            Then("exception should be caught and logged") {
+                shouldNotThrow<Exception> {
+                    scheduler.processPendingOrders()
+                }
+            }
+        }
+    }
+})
+```
+</example>
+
+---
+
+## Quick Reference Summary
+
+| Aspect | Rule |
+|--------|------|
+| **Location** | `{domain}.scheduler` package, `{Domain}Scheduler.kt` |
+| **Annotation** | `@Component` on class, `@Scheduled` on method |
+| **Configuration** | `@EnableScheduling` in Application.kt |
+| **Exception Handling** | `try/catch` in every scheduled method |
+| **Logging** | Start, completion, and error logging required |
+| **Idempotency** | All jobs must be idempotent |
+| **Service Integration** | Services provide work methods, schedulers orchestrate |
+
+**Key Principles**:
+- ✅ Separate schedulers from controllers/services
+- ✅ All jobs are idempotent
+- ✅ Exception handling prevents thread death
+- ✅ Comprehensive logging for observability
+- ✅ Services contain business logic, schedulers orchestrate execution
