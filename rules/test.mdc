@@ -309,8 +309,23 @@ Controller tests SHOULD NOT:
 - Re-test all service business logic branches
 - Verify deep domain rules (belongs in Service tests)
 
+[NOTE]
+- When importing `@WebMvcTest`, use:
+  `org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest` (MUST CHECK IMPORT SOURCE)
+
+- All injected dependencies (e.g., Service-layer classes) MUST be provided via `@MockkBean`.
+
+- When importing `@MockkBean`, use:
+  `com.ninjasquad.springmockk.MockkBean`
+
 #### [Example Code]
 ```
+...
+
+import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest
+import com.ninjasquad.springmockk.MockkBean
+...
+
 @WebMvcTest(OrderController::class)
 class OrderControllerTest(
     private val mockMvc: MockMvc,
@@ -373,6 +388,20 @@ Use one of:
 
 Default:
 - Use `runBlocking` unless the repo defines a standard alternative.
+
+[NOTE]
+Some gRPC coroutine stub methods accept an additional `metadata` (or `callOptions`) parameter.  
+Therefore, when stubbing with `coEvery`, you MUST match **both arguments**.
+
+Example:
+```kt
+coEvery {
+    stub.findOrder(
+        any<FindOrderRequest>(),
+        any()
+    )
+} returns response
+
 
 #### [Example Code]
 ```kt
@@ -455,18 +484,7 @@ Reason:
 - Each When MUST be independent and should not rely on side effects from other Whens.
 - If state is shared, reset it explicitly or re-instantiate per scenario.
 
-### 10.2 Verification (optional, but recommended when behavior matters)
-
-When interaction matters, you MAY add:
-
-- verify(exactly = 1) { dependency.method(...) }
-- coVerify(exactly = 1) { ... }
-
-But do NOT overuse verification:
-
-- Prefer output/state assertions unless call counts are the core requirement.
-
-### 10.3 Readability standards
+### 10.2 Readability standards
 
 - Scenario names MUST describe business intent, not implementation detail.
 - Keep setup minimal; avoid excessive boilerplate.
