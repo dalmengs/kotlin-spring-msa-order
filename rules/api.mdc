@@ -24,10 +24,10 @@ When implementing or reviewing API code, you MUST:
 
 ---
 
-## Project structure (Domain-first) / 프로젝트 구조
+## Project structure (Domain-first)
 
-### Domain-first package layout / 도메인 기준 패키지 구조
-- **MUST**: Split code by domain. (모든 기능은 도메인 기준으로 분리)
+### Domain-first package layout 
+- **MUST**: Split code by domain.
 - **MUST**: Each domain must follow the same internal folder layout. (도메인마다 동일한 위치/역할)
 
 ```
@@ -58,17 +58,17 @@ src/main/kotlin/com/dalmeng/convention/
 
 ## Common response rules / 공통 응답 규칙
 
-### Always wrap responses with BaseResponse / BaseResponse 강제
+### Always wrap responses with BaseResponse
 - **MUST**: Controller return type must always be `BaseResponse<T>`.
 - **MUST**: For success responses, use `BaseResponse.ok(data = ...)`.
 - **MUST NOT**: Do not manually construct `ResponseEntity` in Controllers.
   - Exception: file downloads/streams or other non-JSON responses.
 
-참고 구현 / Reference:
+Reference:
 - `com.dalmeng.convention.common.response.BaseResponse`
 - `com.dalmeng.convention.common.response.ErrorResponse`
 
-### BaseResponse field semantics / BaseResponse 필드 의미
+### BaseResponse field semantics
 - **statusCode**: HTTP status code to return (e.g. 200, 400, 404)
 - **message**: human-readable message (`"Succeed"` / `"Failed"` by default)
 - **data**: payload for success responses
@@ -76,9 +76,9 @@ src/main/kotlin/com/dalmeng/convention/
 
 ---
 
-## API URI conventions / API URI 컨벤션
+## API URI conventions
 
-### Base principles / 기본 원칙
+### Base principles
 - **MUST**: Use nouns only. (No verbs in paths)  
 - **MUST**: Use lowercase paths. (e.g. `/chatroom`, `/chat`)
 - **MUST**: Accept resource identifiers via path variables. (e.g. `/{id}`)
@@ -86,17 +86,17 @@ src/main/kotlin/com/dalmeng/convention/
 - **SHOULD**: Match existing codebase style: singular base paths (e.g. `/chatroom`, `/character`).
 - **SHOULD**: For multi-word resources, use hyphen: `/user-profile` (avoid underscores).
 
-### Nested resources / 중첩 리소스
+### Nested resources 
 - **SHOULD**: Keep nesting shallow (max depth 2).
 - **MUST**: Nest only when ownership/scope is unambiguous.
 
-예시 / Examples:
-- `GET /chatroom/{id}`: chatroom 단건 조회
-- `GET /chat/chatroom/{chatroomId}`: 특정 chatroom의 chat 목록(페이징)
+Examples:
+- `GET /chatroom/{id}`: find one chatroom 
+- `GET /chat/chatroom/{chatroomId}`: chat records of the chatroom with paging
 
 ---
 
-## HTTP method semantics / HTTP Method 컨벤션
+## HTTP method semantics
 
 ### GET (Read)
 - **MUST**: Use GET for reads only.
@@ -117,14 +117,14 @@ src/main/kotlin/com/dalmeng/convention/
 
 ---
 
-## Controller layer conventions / Controller 계층 컨벤션
+## Controller layer conventions
 
-### Responsibilities / 책임
+### Responsibilities
 - **MUST**: Controllers are thin HTTP adapters (binding + response shape only).
 - **MUST**: Delegate all business logic to the Service layer.
 - **MUST NOT**: Do not handle exceptions with try/catch in Controllers (Global handler converts exceptions).
 
-### Required parameters / 필수 파라미터 규칙
+### Required parameters
 - **MUST**: Receive user identity as an HTTP header.
   - Header name: **`X-User-Id`**
   - Signature example: `@RequestHeader("X-User-Id") userId: String`
@@ -132,7 +132,7 @@ src/main/kotlin/com/dalmeng/convention/
 - **MUST NOT**: Do not implement authentication/authorization logic in Controllers.
 - **SHOULD**: Only allow `userId: String?` for explicitly “optional login” endpoints.
 
-### Always define request/response DTOs / Request/Response DTO 강제
+### Always define request/response DTOs
 - **MUST**: Define request and response DTOs for every endpoint.
   - Exception: body-less GET/DELETE may use only path/query parameters.
 - **MUST NOT**: Never use Entities as request/response models.
@@ -150,11 +150,11 @@ src/main/kotlin/com/dalmeng/convention/
 - `com.dalmeng.convention.common.paging.BasePagingRequest`
 - `com.dalmeng.convention.common.paging.PagingResponse`
 
-### Paging usage rules / 페이징 사용 규칙
+### Paging usage rules
 - **MUST**: Controllers must bind paging params via `@ModelAttribute` only.
 - **MUST**: Services must call `request.validate()` early to enforce valid paging combinations.
 
-### Controller 템플릿 / Standard controller template
+### Standard controller template
 
 ```kotlin
 @RestController
@@ -202,9 +202,9 @@ class ResourceController(
 
 ---
 
-## Exception conventions / Exception 컨벤션
+## Exception conventions
 
-### Principles / 기본 원칙
+### Principles
 - **MUST**: Represent expected failures (domain rule violations, missing resources, forbidden access) as custom exceptions.
 - **MUST**: Place domain exceptions under `{domain}/exception/`.
 - **MUST**: Domain exceptions must extend `BaseException(statusCode, message)`.
@@ -215,7 +215,7 @@ class ResourceController(
 - `com.dalmeng.convention.common.exception.BaseException`
 - `com.dalmeng.convention.common.exception.GlobalExceptionHandler`
 
-### 예외 네이밍 / Naming
+### Naming
 - **MUST**: `XNotFoundException` (404)
 - **MUST**: `InvalidXRequestException` / `InvalidXException` (400)
 - **SHOULD**: `XForbiddenException` (403), `XUnauthorizedException` (401), `XConflictException` (409)
@@ -230,21 +230,21 @@ class ResourceController(
 
 ---
 
-## Service layer conventions / Service 계층 컨벤션
+## Service layer conventions 
 
-### Responsibilities / 책임
+### Responsibilities
 - **MUST**: Implement all business logic in Services.
 - **MUST**: Enforce ownership/authorization checks in Services (e.g., compare `userId` with resource owner).
 - **MUST NOT**: Never return Entities from Services; return DTOs only.
 
-### Transactions / 트랜잭션
+### Transactions
 - **MUST**: Use `@Transactional` for create/update/delete.
 - **MUST**: Use `@Transactional(readOnly = true)` for reads.
 - **MUST NOT**: Do not put transactions on Controllers.
 
 > Repository/QueryRepository 트랜잭션/쿼리 규칙은 `rules/database.mdc` 를 따릅니다.
 
-### Function signature & naming / 함수 시그니처/이름 컨벤션
+### Function signature & naming
 - **MUST**: For user-scoped APIs, `userId` must be the first parameter.
 - **SHOULD**: Single read: `findXById(userId, id)`
 - **SHOULD**: Paged collection read: `findXs(userId, request)`
@@ -252,12 +252,12 @@ class ResourceController(
 - **MUST**: Update: `updateX(userId, id, request)`
 - **MUST**: Delete: `deleteX(userId, id)`
 
-### Paging in Services / Service 페이징 사용
+### Paging in Services
 - **MUST**: Use `PagingService.paginate(request, handlers)`.
 - **MUST**: Always convert to DTO via `pagingService.map(...)` (never return `PagingResponse<Entity>`).
 - **MUST**: Implement handlers/repositories/queries by following `rules/database.mdc` (do not duplicate DB internals here).
 
-서비스 예시 / Example:
+Example:
 
 ```kotlin
 @Transactional(readOnly = true)
@@ -271,9 +271,9 @@ fun findXs(userId: String, request: BasePagingRequest): PagingResponse<XResponse
 
 ---
 
-## DTO conventions / DTO 컨벤션
+## DTO conventions
 
-### 폴더 구조 / Folder layout
+### Folder layout
 - **MUST**: 도메인 하위에 `dto/request`, `dto/response`를 둡니다.
 
 ```
@@ -285,7 +285,7 @@ fun findXs(userId: String, request: BasePagingRequest): PagingResponse<XResponse
     └── XResponse.kt
 ```
 
-### Request DTO rules / Request DTO 규칙
+### Request DTO rules
 
 #### Create Request
 - **MUST**: Required fields must be non-null.
@@ -297,20 +297,20 @@ fun findXs(userId: String, request: BasePagingRequest): PagingResponse<XResponse
 - **MUST**: All fields must be nullable.
 - **MUST**: Pass nullable fields into `entity.update(...)`; the Entity applies them with `?.let {}`.
 
-### Response DTO rules / Response DTO 규칙
+### Response DTO rules
 - **MUST**: Response DTOs must contain only API-safe fields.
 - **MUST NOT**: Never include the internal DB PK `seq`.
 - **MUST NOT**: Never embed JPA Entities inside Response DTOs.
 - **MUST**: Use `companion object { fun from(entity) }` for mapping.
 
-### Optional fields (flexibility) / 상황별 필드 생략(유연성)
+### Optional fields (flexibility)
 - **MUST**: If a field may be omitted depending on context, model it as nullable in the Response DTO.
 - **SHOULD**: Add overloads/flags when needed.
   - Example: `from(entity)` / `from(entity, includeDetails = true)`
 
 ---
 
-## Entity conventions / Entity 컨벤션
+## Entity conventions
 
 ### BaseEntity inheritance / BaseEntity 상속
 - **MUST**: All entities must extend `com.dalmeng.convention.common.entity.BaseEntity` and consistently use:
@@ -321,24 +321,24 @@ fun findXs(userId: String, request: BasePagingRequest): PagingResponse<XResponse
 > `com.dalmeng.convention.common.response.BaseEntity` 는 사용하지 않습니다.  
 > Use `common.entity.BaseEntity` as the single source of truth.
 
-### JPA relations / 연관관계
+### JPA relations
 - **MUST**: All relations must use `FetchType.LAZY`.
 - **MUST NOT**: `EAGER` is forbidden.
 
-### Where business logic lives / 비즈니스 로직 위치
+### Where business logic lives
 - **MUST**: Put state-changing logic (updates, delete flags, relationship mutations) inside Entity methods.
 - **MUST NOT**: Do not directly mutate Entity fields from Services.
 
-### Creation & invariants / 생성/불변식
+### Creation & invariants
 - **MUST**: Use `companion object.create(...)` as the creation factory.
 - **SHOULD**: Enforce invariants/validation inside the Entity (Services orchestrate use-cases).
 
 ---
 
-## Out of scope / 범위 외
+## Out of scope
 
-아래 내용은 이 문서가 직접 규정하지 않습니다. 대신 해당 룰을 따릅니다:
+This rule does not define below directly:
 
-- **DB/Repository/QueryDSL/JPA/PagingHandlers 구현 상세** → `rules/database.mdc`
-- **Common 폴더 내부 구현 상세** → abstraction을 목표로 하며, 이 문서는 “사용법(How to use)”만 규정합니다.
+- **DB/Repository/QueryDSL/JPA/PagingHandlers Implementation Details** → `rules/database.mdc`
+- **Common Implementation details** → for abstraction, this defines only “How to use”.
 

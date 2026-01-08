@@ -1,0 +1,473 @@
+---
+alwaysApply: true
+---
+
+# Spring Boot + Kotlin Test Writing Convention (Kotest + MockK)
+
+This rule defines **how to write tests in this repository**.  
+All tests MUST follow this document unless explicitly stated otherwise.
+
+---
+
+## 1) Naming Rule
+
+- Test file names MUST be:  
+  **`{OriginalFileName}Test.kt`**
+
+Examples:
+- `OrderService.kt` → `OrderServiceTest.kt`
+- `WalletGrpcClient.kt` → `WalletGrpcClientTest.kt`
+
+---
+
+## 2) Test Package / Directory Structure
+
+Tests MUST mirror the production package structure exactly.
+
+Example:
+- Production: `com.dalmeng.convention.order.service.OrderService`
+- Test MUST be located at:  
+  `src/test/kotlin/com/dalmeng/convention/order/service/OrderServiceTest.kt`
+
+Rule:
+- **Same package name**
+- **Same folder depth**
+- **Only file name ends with `Test`**
+
+---
+
+## 3) What Must Be Tested vs. Not Tested
+
+### 3.1 Do NOT write direct tests for these targets
+The following are excluded from direct unit tests:
+
+- `common` module
+- Repository-layer classes
+- DTOs (request/response)
+- Exception classes
+- Paging utilities / paging services (including generic paging primitives)
+
+**Reasoning / Goal**:
+These should be covered **indirectly** via Service/Controller/Kafka/gRPC tests.
+
+> DTO/Exception correctness should be validated naturally through Service/Controller tests that use them.
+
+---
+
+### 3.2 MUST write direct tests for these targets
+
+#### A) Service layer
+- **Every Service class**
+- **Every public function in Service classes**
+
+#### B) Controller layer
+- **Every controller endpoint function**
+
+#### C) Kafka / gRPC domain logic classes
+Write tests for **logic-driving classes**, such as:
+
+- Kafka Consumers that execute business logic  
+  Example: `KafkaWalletConsumer` (consumes events and runs internal logic) → MUST test
+
+- gRPC communication classes  
+  Example: `WalletGrpcClient`, `OrderGrpcServer` → MUST test
+
+Do NOT directly test **event definition objects only**:
+- Example: `WalletDebitedEvent` → NO direct tests  
+  It must be covered through Consumer/Listener/Server tests.
+
+---
+
+## 4) Coverage Rule: Cover All Business Branches
+
+If business logic contains branching, tests MUST cover **all meaningful branches**.
+
+Example:
+- If behavior depends on `age` range and `gender`, tests MUST cover:
+  - Each relevant `gender`
+  - Each relevant `age` boundary / range
+  - Combinations that hit every branch
+
+Rule of thumb:
+- Cover success + failure
+- Cover boundary values (min/max edges)
+- Cover conditional splits (if/else, when, nullability, feature flags)
+
+---
+
+## 5) Unit Test Style: Kotest + MockK + BehaviorSpec (Given/When/Then)
+
+### 5.1 Mandatory test framework and style
+All unit tests MUST use:
+- **Kotest**
+- **MockK**
+- **`BehaviorSpec`**
+- **Given / When / Then structure**
+
+### 5.2 Mocking rule: Do not mock the SUT (System Under Test)
+- The **test target class (SUT)** MUST NOT be mocked.
+- Only the **dependencies injected into the SUT** can be mocked.
+- Instantiate the real SUT using constructor injection.
+
+✅ Correct:
+- `val orderService = mockk<OrderService>()`
+- `val sut = OrderServiceFacade(orderService, walletService)`
+
+❌ Incorrect:
+- `val sut = mockk<OrderServiceFacade>()`
+
+### 5.3 Stubbing rule
+- Use `every { ... } returns ...` for normal functions
+- Use `coEvery { ... } returns ...` for `suspend` functions
+- Use `throws` to simulate exceptions
+
+### 5.4 Assertion rule
+- Validate final results ONLY in `Then`
+- Use:
+  - `shouldBe`, `shouldNotBe`, etc.
+  - `shouldThrow<T> { ... }` for exceptions (**generic type MUST be explicit**)
+
+✅ Required:
+- `shouldThrow<OrderNotFoundException> { ... }`
+
+❌ Not allowed:
+- `shouldThrow { ... }` (missing generic type)
+
+---
+
+## 6) Example: Service/Facade Unit Test (BehaviorSpec)
+
+Key expectations:
+- Each `When` describes a single scenario
+- Each scenario contains strict assertions in `Then`
+- Exceptions are verified with `shouldThrow<T>`
+
+#### [Example Code]
+```kt
+class OrderServiceFacadeTest : BehaviorSpec({
+    val orderService = mockk<OrderService>()
+    val walletService = mockk<WalletService>()
+
+    val orderServiceFacade = OrderServiceFacade(
+        orderService = orderService,
+        walletService = walletService,
+    )
+
+    Given("Handle Payment Request") {
+        val userId = "test_user_id_1"
+        val order = Order.create(userId, 1000)
+        val orderResponse = OrderResponse.from(order)
+        val orderId = order.orderId
+
+        When("order exists and payment succeeds") {
+            val decreaseWalletResponse = DecreaseWalletResponse.newBuilder()
+                .setOrderId(orderId)
+                .setUserId(userId)
+                .setRequestedAmount(1000)
+                .setPaymentResult(PaymentResult.SUCCEED)
+                .setBeforeBalance(5000)
+                .setAfterBalance(4000)
+                .setSuccess(true)
+                .setMessage("Payment succeeded")
+                .build()
+
+            every {
+                orderService.findCreatedOrderByOrderId(userId, orderId)
+            } returns orderResponse
+
+            every {
+                walletService.decreaseBalance(
+                    orderId = orderId,
+                    userId = userId,
+                    amount = 1000
+                )
+            } returns decreaseWalletResponse
+
+            val result = orderServiceFacade.handlePayment(userId, orderId)
+
+            Then("payment response is returned successfully") {
+                result.userId shouldBe userId
+                result.orderId shouldBe orderId
+                result.aggregateId shouldBe orderResponse.aggregateId
+                result.paymentResult shouldBe PaymentResult.SUCCEED
+                result.requestedAmount shouldBe 1000
+                result.beforeBalance shouldBe 5000
+                result.afterBalance shouldBe 4000
+                result.success shouldBe true
+                result.message shouldBe "Payment succeeded"
+            }
+        }
+
+        When("order does not exist") {
+            every {
+                orderService.findCreatedOrderByOrderId(userId, orderId)
+            } throws OrderNotFoundException()
+
+            Then("OrderNotFoundException is thrown") {
+                shouldThrow<OrderNotFoundException> {
+                    orderServiceFacade.handlePayment(userId, orderId)
+                }
+            }
+        }
+
+        When("order exists but payment fails with insufficient balance") {
+            val decreaseWalletResponse = DecreaseWalletResponse.newBuilder()
+                .setOrderId(orderId)
+                .setUserId(userId)
+                .setRequestedAmount(1000)
+                .setPaymentResult(PaymentResult.INSUFFICIENT_BALANCE)
+                .setBeforeBalance(500)
+                .setAfterBalance(500)
+                .setSuccess(false)
+                .setMessage("Insufficient balance")
+                .build()
+
+            every {
+                orderService.findCreatedOrderByOrderId(userId, orderId)
+            } returns orderResponse
+
+            every {
+                walletService.decreaseBalance(
+                    orderId = orderId,
+                    userId = userId,
+                    amount = 1000
+                )
+            } returns decreaseWalletResponse
+
+            val result = orderServiceFacade.handlePayment(userId, orderId)
+
+            Then("payment response with failure is returned") {
+                result.paymentResult shouldBe PaymentResult.INSUFFICIENT_BALANCE
+                result.success shouldBe false
+                result.message shouldBe "Insufficient balance"
+                result.beforeBalance shouldBe 500
+                result.afterBalance shouldBe 500
+            }
+        }
+
+        When("order exists but payment fails with invalid payment") {
+            val decreaseWalletResponse = DecreaseWalletResponse.newBuilder()
+                .setOrderId(orderId)
+                .setUserId(userId)
+                .setRequestedAmount(1000)
+                .setPaymentResult(PaymentResult.INVALID_PAYMENT)
+                .setBeforeBalance(5000)
+                .setAfterBalance(5000)
+                .setSuccess(false)
+                .setMessage("Invalid payment")
+                .build()
+
+            every {
+                orderService.findCreatedOrderByOrderId(userId, orderId)
+            } returns orderResponse
+
+            every {
+                walletService.decreaseBalance(
+                    orderId = orderId,
+                    userId = userId,
+                    amount = 1000
+                )
+            } returns decreaseWalletResponse
+
+            val result = orderServiceFacade.handlePayment(userId, orderId)
+
+            Then("payment response with invalid payment is returned") {
+                result.paymentResult shouldBe PaymentResult.INVALID_PAYMENT
+                result.success shouldBe false
+                result.message shouldBe "Invalid payment"
+            }
+        }
+    }
+})
+```
+
+---
+
+## 7) Controller Tests (Spring MVC)
+
+### 7.1 Use `@WebMvcTest`
+Controller tests MUST use:
+- `@WebMvcTest(YourController::class)`
+
+### 7.2 Mock injection rule
+In `@WebMvcTest`, dependencies MUST be injected with:
+- `@MockkBean`
+
+Example:
+- `@MockkBean private val orderService: OrderService`
+
+### 7.3 What controller tests should validate
+Controller tests MUST focus on:
+- HTTP status
+- JSON response wrapper correctness:
+  - `BaseResponse`
+  - `BasePagingResponse`
+- Key payload fields are present and correct
+- Security-sensitive fields MUST NOT leak (example: `seq` should not exist)
+
+Controller tests SHOULD NOT:
+- Re-test all service business logic branches
+- Verify deep domain rules (belongs in Service tests)
+
+#### [Example Code]
+```
+@WebMvcTest(OrderController::class)
+class OrderControllerTest(
+    private val mockMvc: MockMvc,
+    @MockkBean private val orderService: OrderService,
+    @MockkBean private val orderServiceFacade: OrderServiceFacade,
+) : BehaviorSpec({
+
+    val objectMapper = ObjectMapper()
+
+    Given("POST /api/order - Create Order") {
+        val userId = "test_user_id_1"
+        val request = CreateOrderRequest(1000)
+        val order = Order.create(userId, 1000)
+        val orderResponse = OrderResponse.from(order)
+
+        When("valid request is provided") {
+            every {
+                orderService.createOrder(userId, request)
+            } returns orderResponse
+
+            Then("order is created successfully") {
+                mockMvc.perform(
+                    post("/api/order")
+                        .header("X-User-Id", userId)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request))
+                )
+                    .andExpect(status().isOk)
+                    .andExpect(jsonPath("$.statusCode").value(200))
+                    .andExpect(jsonPath("$.message").value("Succeed"))
+                    .andExpect(jsonPath("$.data.orderId").value(orderResponse.orderId))
+                    .andExpect(jsonPath("$.data.userId").value(userId))
+                    .andExpect(jsonPath("$.data.amount").value(1000))
+                    .andExpect(jsonPath("$.data.status").value("CREATED"))
+                    .andExpect(jsonPath("$.data.seq").doesNotExist())
+            }
+        }
+    }
+})
+```
+
+---
+
+## 8) gRPC / Coroutine (suspend) Function Test Rules
+
+### 8.1 Lateinit dependency injection pattern
+If the class under test uses `lateinit` fields (e.g., `@GrpcClient` stub),
+tests MUST inject the mock stub manually using `apply`.
+
+Example pattern:
+- `val sut = WalletGrpcClient().apply { this.stub = stub }`
+
+### 8.2 Suspend stubbing
+- `suspend` functions MUST use `coEvery { ... }`
+
+### 8.3 Calling suspend functions
+Use one of:
+- `runBlocking { ... }`
+- Kotest coroutine test utilities (if already used in this repo)
+
+Default:
+- Use `runBlocking` unless the repo defines a standard alternative.
+
+#### [Example Code]
+```kt
+class WalletGrpcClientTest : BehaviorSpec({
+    val stub = mockk<WalletServiceGrpcKt.WalletServiceCoroutineStub>()
+
+    val walletGrpcClient = WalletGrpcClient().apply {
+        this.stub = stub
+    }
+
+    Given("Decrease Wallet Request") {
+        val orderId = "test_order_id_1"
+        val userId = "test_user_id_1"
+        val amount = 1000L
+
+        When("decrease succeeds") {
+            val response = DecreaseWalletResponse.newBuilder()
+                .setOrderId(orderId)
+                .setUserId(userId)
+                .setRequestedAmount(amount)
+                .setPaymentResult(PaymentResult.SUCCEED)
+                .setBeforeBalance(5000)
+                .setAfterBalance(4000)
+                .setSuccess(true)
+                .setMessage("Payment succeeded")
+                .build()
+
+            coEvery {
+                stub.decreaseWallet(
+                    any<DecreaseWalletRequest>(),
+                    any()
+                )
+            } returns response
+
+            val result = runBlocking {
+                walletGrpcClient.decrease(orderId, userId, amount)
+            }
+
+            Then("decrease response is returned successfully") {
+                result.orderId shouldBe orderId
+                result.userId shouldBe userId
+                result.requestedAmount shouldBe amount
+                result.paymentResult shouldBe PaymentResult.SUCCEED
+                result.beforeBalance shouldBe 5000
+                result.afterBalance shouldBe 4000
+                result.success shouldBe true
+                result.message shouldBe "Payment succeeded"
+            }
+        }
+    }
+})
+```
+
+---
+
+## 9) Generic Functions: Type Arguments Are Mandatory (PagingService, etc.)
+
+When mocking functions that require generic types, ALWAYS specify generic type parameters explicitly.
+
+✅ Required:
+```kt
+every {
+    pagingService.paginate<Order>(any(), any())
+} returns pagingResponse
+
+every {
+    pagingService.map<Order, OrderResponse>(any(), any())
+} returns pagingMappingResponse
+```
+
+Reason:
+
+- Prevents type inference issues and unexpected runtime behavior.
+- Ensures mocks match the exact function signature.
+
+## 10) Additional Mandatory Quality Rules
+
+### 10.1 Scenario isolation
+
+- Each When MUST be independent and should not rely on side effects from other Whens.
+- If state is shared, reset it explicitly or re-instantiate per scenario.
+
+### 10.2 Verification (optional, but recommended when behavior matters)
+
+When interaction matters, you MAY add:
+
+- verify(exactly = 1) { dependency.method(...) }
+- coVerify(exactly = 1) { ... }
+
+But do NOT overuse verification:
+
+- Prefer output/state assertions unless call counts are the core requirement.
+
+### 10.3 Readability standards
+
+- Scenario names MUST describe business intent, not implementation detail.
+- Keep setup minimal; avoid excessive boilerplate.
+- Use meaningful IDs and amounts (e.g., userId, orderId, amount) consistently.
